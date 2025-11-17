@@ -1,0 +1,308 @@
+### Attendance Management System API Tests
+
+@baseUrl = http://localhost:3000
+@token = YOUR_TOKEN_HERE
+
+### Health Check
+GET {{baseUrl}}/health
+
+### Root Endpoint
+GET {{baseUrl}}/
+
+###############################################
+### Authentication
+###############################################
+
+### Register New User
+POST {{baseUrl}}/api/auth/register
+Content-Type: application/json
+
+{
+  "email": "testuser@company.com",
+  "password": "password123",
+  "name": "Test User",
+  "employee_id": "EMP999",
+  "role": "employee"
+}
+
+### Login as Admin
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@company.com",
+  "password": "employee123"
+}
+
+### Login as Employee
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "john.doe@company.com",
+  "password": "employee123"
+}
+
+### Get Current User
+GET {{baseUrl}}/api/auth/me
+Authorization: Bearer {{token}}
+
+### Refresh Token
+POST {{baseUrl}}/api/auth/refresh-token
+Authorization: Bearer {{token}}
+
+### Logout
+POST {{baseUrl}}/api/auth/logout
+Authorization: Bearer {{token}}
+
+###############################################
+### Attendance Management
+###############################################
+
+### Check In
+POST {{baseUrl}}/api/attendance/check-in
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "location": {
+    "latitude": 40.7128,
+    "longitude": -74.0060,
+    "city": "New York"
+  }
+}
+
+### Get Attendance Status
+GET {{baseUrl}}/api/attendance/status
+Authorization: Bearer {{token}}
+
+### Get Today's Attendance
+GET {{baseUrl}}/api/attendance/today
+Authorization: Bearer {{token}}
+
+### Get Attendance History
+GET {{baseUrl}}/api/attendance/history?start_date=2025-01-01&end_date=2025-12-31
+Authorization: Bearer {{token}}
+
+### Update Attendance Notes
+PUT {{baseUrl}}/api/attendance/ATTENDANCE_ID_HERE/notes
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "notes": "Worked on backend development"
+}
+
+### Check Out
+POST {{baseUrl}}/api/attendance/check-out
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "location": {
+    "latitude": 40.7128,
+    "longitude": -74.0060,
+    "city": "New York"
+  }
+}
+
+###############################################
+### Activity Tracking
+###############################################
+
+### Send Heartbeat
+POST {{baseUrl}}/api/activity/heartbeat
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "is_active": true,
+  "active_window": "VS Code - index.js",
+  "active_application": "Visual Studio Code",
+  "url": null,
+  "mouse_clicks": 15,
+  "keyboard_strokes": 120
+}
+
+### Log Activity
+POST {{baseUrl}}/api/activity/log
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "is_active": true,
+  "active_window": "Chrome - Documentation",
+  "active_application": "Google Chrome",
+  "url": "https://docs.example.com"
+}
+
+### Get Current Activity
+GET {{baseUrl}}/api/activity/current
+Authorization: Bearer {{token}}
+
+### Get Activity History
+GET {{baseUrl}}/api/activity/history?date=2025-11-17
+Authorization: Bearer {{token}}
+
+###############################################
+### Lunch Breaks
+###############################################
+
+### Start Lunch Break
+POST {{baseUrl}}/api/lunch-break/start
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "location": {
+    "latitude": 40.7128,
+    "longitude": -74.0060
+  }
+}
+
+### Get Current Lunch Break
+GET {{baseUrl}}/api/lunch-break/current
+Authorization: Bearer {{token}}
+
+### End Lunch Break
+POST {{baseUrl}}/api/lunch-break/end
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "location": {
+    "latitude": 40.7128,
+    "longitude": -74.0060
+  }
+}
+
+###############################################
+### Screenshots
+###############################################
+
+### Upload Screenshot (Multipart Form)
+POST {{baseUrl}}/api/screenshots/upload
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="screenshot"; filename="screenshot.jpg"
+Content-Type: image/jpeg
+
+< ./path/to/screenshot.jpg
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="active_window_title"
+
+VS Code - index.js
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="active_application"
+
+Visual Studio Code
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="screen_resolution"
+
+1920x1080
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+### List Screenshots
+GET {{baseUrl}}/api/screenshots/list?date=2025-11-17
+Authorization: Bearer {{token}}
+
+### Get Screenshot by ID
+GET {{baseUrl}}/api/screenshots/SCREENSHOT_ID_HERE
+Authorization: Bearer {{token}}
+
+### Delete Screenshot
+DELETE {{baseUrl}}/api/screenshots/SCREENSHOT_ID_HERE
+Authorization: Bearer {{token}}
+
+###############################################
+### Reports (Admin Only)
+###############################################
+
+### Get Daily Report
+GET {{baseUrl}}/api/reports/daily?date=2025-11-17&user_id=USER_ID_HERE
+Authorization: Bearer {{token}}
+
+### Get Weekly Report
+GET {{baseUrl}}/api/reports/weekly?start_date=2025-11-10&user_id=USER_ID_HERE
+Authorization: Bearer {{token}}
+
+### Get Monthly Report
+GET {{baseUrl}}/api/reports/monthly?month=11&year=2025&user_id=USER_ID_HERE
+Authorization: Bearer {{token}}
+
+### Get Productivity Summary
+GET {{baseUrl}}/api/reports/productivity-summary?user_id=USER_ID_HERE&period=week
+Authorization: Bearer {{token}}
+
+### Get Team Overview
+GET {{baseUrl}}/api/reports/team-overview?date=2025-11-17
+Authorization: Bearer {{token}}
+
+### Export Report
+GET {{baseUrl}}/api/reports/export?format=csv&type=daily
+Authorization: Bearer {{token}}
+
+###############################################
+### User Management (Admin Only)
+###############################################
+
+### Get All Users
+GET {{baseUrl}}/api/users
+Authorization: Bearer {{token}}
+
+### Create User
+POST {{baseUrl}}/api/users
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "email": "newemployee@company.com",
+  "password": "password123",
+  "name": "New Employee",
+  "employee_id": "EMP005",
+  "role": "employee"
+}
+
+### Get User by ID
+GET {{baseUrl}}/api/users/USER_ID_HERE
+Authorization: Bearer {{token}}
+
+### Update User
+PUT {{baseUrl}}/api/users/USER_ID_HERE
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Updated Name",
+  "status": "active"
+}
+
+### Delete User
+DELETE {{baseUrl}}/api/users/USER_ID_HERE
+Authorization: Bearer {{token}}
+
+### Get User Attendance Summary
+GET {{baseUrl}}/api/users/USER_ID_HERE/attendance-summary
+Authorization: Bearer {{token}}
+
+###############################################
+### Settings
+###############################################
+
+### Get All Settings
+GET {{baseUrl}}/api/settings
+Authorization: Bearer {{token}}
+
+### Update Setting (Admin Only)
+PUT {{baseUrl}}/api/settings/screenshot_interval
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "value": {
+    "minutes": 15
+  },
+  "description": "Updated screenshot interval"
+}

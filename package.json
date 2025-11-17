@@ -1,0 +1,35 @@
+{
+  "name": "attendance-management-backend",
+  "version": "1.0.0",
+  "description": "Complete Attendance Management System Backend API",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "seed": "node src/utils/seed.js",
+    "migrate": "node src/utils/migrate.js"
+  },
+  "keywords": [
+    "attendance",
+    "tracking",
+    "time-management",
+    "employee-monitoring"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.1",
+    "express-validator": "^7.3.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.1",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^3.0.3",
+    "pg": "^8.16.3",
+    "redis": "^4.7.1",
+    "sharp": "^0.33.5"
+  }
+}
