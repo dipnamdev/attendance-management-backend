@@ -77,11 +77,13 @@ npm run seed
 
 This creates:
 - 1 Admin user: `admin@company.com` / `employee123`
-- 3 Employee users:
-  - `john.doe@company.com` / `employee123`
-  - `jane.smith@company.com` / `employee123`
-  - `mike.johnson@company.com` / `employee123`
+- 3 Employee users (all with password: `employee123`):
+  - `john.doe@company.com`
+  - `jane.smith@company.com`
+  - `mike.johnson@company.com`
 - Default system settings
+
+**Note**: The seed script uses a pre-hashed password. If you need to change passwords, use the bcrypt hash for `employee123` or update the seed script with your own hashed passwords.
 
 6. **Start the Server**
 ```bash
