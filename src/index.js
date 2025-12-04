@@ -9,6 +9,10 @@ const { connectRedis } = require('./config/redis');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
 const runDailyAggregation = require('./jobs/dailyAggregation');
+const autoCloseExcessiveBreaks = require('./jobs/autoCloseBreaks');
+const autoCheckOutUsers = require('./jobs/autoCheckOut');
+const createDailyAttendance = require('./jobs/createDailyAttendance');
+const cleanupOldData = require('./jobs/cleanupOldData');
 
 validateConfig();
 
@@ -63,6 +67,7 @@ app.use('/api/settings', settingsRoutes);
 app.use(notFound);
 app.use(errorHandler);
 
+// Daily aggregation job (Midnight)
 cron.schedule('0 0 * * *', async () => {
   logger.info('Running daily aggregation job...');
   try {
@@ -72,17 +77,69 @@ cron.schedule('0 0 * * *', async () => {
   }
 });
 
+// Auto-close excessive breaks job (Every 5 minutes)
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    await autoCloseExcessiveBreaks();
+  } catch (error) {
+    logger.error('Auto-close excessive breaks job failed:', error);
+  }
+});
+
+// Auto-checkout job (Daily at 23:59) - use explicit timezone if provided
+const serverTimeZone = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+logger.info(`Scheduling auto-checkout job to run at 23:59 server timezone: ${serverTimeZone}`);
+cron.schedule('59 23 * * *', async () => {
+  try {
+    await autoCheckOutUsers();
+  } catch (error) {
+    logger.error('Auto-checkout job failed:', error);
+  }
+}, {
+  timezone: serverTimeZone,
+});
+
+// Cleanup old screenshots and related data (Daily at 02:00)
+cron.schedule('0 2 * * *', async () => {
+  logger.info('Running cleanupOldData job (screenshots retention)...');
+  try {
+    const result = await cleanupOldData();
+    logger.info(`cleanupOldData result: ${JSON.stringify(result)}`);
+  } catch (error) {
+    logger.error('cleanupOldData job failed:', error);
+  }
+});
+
 async function startServer() {
   try {
     connectRedis().catch(() => {
       logger.warn('⚠️  Starting server without Redis caching');
     });
-    
+
     app.listen(PORT, '0.0.0.0', () => {
       logger.info(`🚀 Server running on port ${PORT}`);
       logger.info(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
       logger.info(`🔗 API URL: http://0.0.0.0:${PORT}`);
       logger.info('✅ Daily aggregation job scheduled for midnight');
+      // Attempt to backfill any missed auto-checkouts that occurred while the server was down
+      try {
+        if (typeof autoCheckOutUsers?.backfillMissed === 'function') {
+          autoCheckOutUsers.backfillMissed()
+            .then(result => logger.info(`Backfill result: ${JSON.stringify(result)}`))
+            .catch(err => logger.error('Backfill failed on startup:', err));
+        }
+      } catch (err) {
+        logger.error('Error invoking backfill on startup:', err);
+      }
+
+      // Ensure today's attendance rows exist (create missing per-user rows)
+      try {
+        createDailyAttendance()
+          .then(res => logger.info(`createDailyAttendance result: ${JSON.stringify(res)}`))
+          .catch(err => logger.error('createDailyAttendance failed on startup:', err));
+      } catch (err) {
+        logger.error('Error invoking createDailyAttendance on startup:', err);
+      }
     });
   } catch (error) {
     logger.error('Failed to start server:', error);

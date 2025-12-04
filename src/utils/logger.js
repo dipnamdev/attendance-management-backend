@@ -9,20 +9,28 @@ if (!fs.existsSync(logDir)) {
 const logger = {
   info: (message, ...args) => {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] INFO:`, message, ...args);
+    const logMessage = `[${timestamp}] INFO: ${message} ${args.map(a => JSON.stringify(a)).join(' ')}\n`;
+    console.log(logMessage.trim());
+    fs.appendFileSync(path.join(logDir, 'app.log'), logMessage);
   },
   error: (message, ...args) => {
     const timestamp = new Date().toISOString();
-    console.error(`[${timestamp}] ERROR:`, message, ...args);
+    const logMessage = `[${timestamp}] ERROR: ${message} ${args.map(a => JSON.stringify(a)).join(' ')}\n`;
+    console.error(logMessage.trim());
+    fs.appendFileSync(path.join(logDir, 'app.log'), logMessage);
   },
   warn: (message, ...args) => {
     const timestamp = new Date().toISOString();
-    console.warn(`[${timestamp}] WARN:`, message, ...args);
+    const logMessage = `[${timestamp}] WARN: ${message} ${args.map(a => JSON.stringify(a)).join(' ')}\n`;
+    console.warn(logMessage.trim());
+    fs.appendFileSync(path.join(logDir, 'app.log'), logMessage);
   },
   debug: (message, ...args) => {
     const timestamp = new Date().toISOString();
+    const logMessage = `[${timestamp}] DEBUG: ${message} ${args.map(a => JSON.stringify(a)).join(' ')}\n`;
     if (process.env.NODE_ENV === 'development') {
-      console.log(`[${timestamp}] DEBUG:`, message, ...args);
+      console.log(logMessage.trim());
+      fs.appendFileSync(path.join(logDir, 'app.log'), logMessage);
     }
   },
 };

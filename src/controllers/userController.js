@@ -35,6 +35,9 @@ const createUser = async (req, res, next) => {
     return successResponse(res, { user: result.rows[0] }, 'User created successfully', 201);
   } catch (error) {
     logger.error('Create user error:', error);
+    const fs = require('fs');
+    const path = require('path');
+    fs.appendFileSync(path.join(__dirname, '../../logs/error.log'), `${new Date().toISOString()} - ${error.message}\n${error.stack}\n\n`);
     next(error);
   }
 };

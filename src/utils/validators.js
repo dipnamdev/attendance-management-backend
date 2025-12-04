@@ -20,7 +20,7 @@ const registerValidation = [
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   body('name').notEmpty().withMessage('Name is required'),
   body('employee_id').notEmpty().withMessage('Employee ID is required'),
-  body('role').optional().isIn(['employee', 'admin']).withMessage('Invalid role'),
+  body('role').optional().isIn(['employee', 'admin', 'hr']).withMessage('Invalid role'),
   validate,
 ];
 

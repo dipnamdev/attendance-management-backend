@@ -1,8 +1,10 @@
 const bcrypt = require('bcrypt');
 const pool = require('../config/database');
 const logger = require('../utils/logger');
+const ensureDatabaseExists = require('./ensureDatabase');
 
 async function seedData() {
+  await ensureDatabaseExists(process.env.DATABASE_URL);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -25,9 +27,7 @@ async function seedData() {
     }
 
     const employees = [
-      { email: 'john.doe@company.com', name: 'John Doe', employee_id: 'EMP002' },
-      { email: 'jane.smith@company.com', name: 'Jane Smith', employee_id: 'EMP003' },
-      { email: 'mike.johnson@company.com', name: 'Mike Johnson', employee_id: 'EMP004' },
+      { email: '0112@gmail.com', name: 'CwS User', employee_id: 'EMP001' },
     ];
 
     for (const employee of employees) {

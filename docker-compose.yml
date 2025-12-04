@@ -1,0 +1,116 @@
+# services:
+#   app:
+#     build: .
+#     ports:
+#       - "3000:3000"
+#     env_file:
+#       - .env
+#     environment:
+#       - NODE_ENV=production
+#       - PORT=3000
+#       # DATABASE_URL should be set in .env file pointing to host PostgreSQL
+#       # Example: DATABASE_URL=postgresql://postgres:password@host.docker.internal:5432/attendance_db
+#       # Or use host IP: DATABASE_URL=postgresql://postgres:password@172.17.0.1:5432/attendance_db
+#       - REDIS_HOST=${REDIS_HOST:-redis}
+#       - REDIS_PORT=${REDIS_PORT:-6379}
+#       - JWT_SECRET=${JWT_SECRET:-change-this-secret-key-in-production}
+#       - JWT_EXPIRY=${JWT_EXPIRY:-24h}
+#       - SESSION_SECRET=${SESSION_SECRET:-change-this-session-secret}
+#       - UPLOAD_DIR=/usr/src/app/uploads
+#       - MAX_FILE_SIZE=${MAX_FILE_SIZE:-5242880}
+#     # Map host.docker.internal to host gateway for Linux compatibility
+#     extra_hosts:
+#       - "host.docker.internal:host-gateway"
+#     depends_on:
+#       redis:
+#         condition: service_started
+#     volumes:
+#       - ./uploads:/usr/src/app/uploads
+#     restart: always
+#     healthcheck:
+#       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+#       interval: 30s
+#       timeout: 10s
+#       retries: 3
+#       start_period: 40s
+
+#   redis:
+#     image: redis:alpine
+#     restart: always
+#     healthcheck:
+#       test: ["CMD", "redis-cli", "ping"]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 5
+
+
+
+
+
+
+version: "3.9"
+
+services:
+  app:
+    build: .
+    container_name: backend_app
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: ${DATABASE_URL}  # Passed from .env
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRY: ${JWT_EXPIRY}
+      SESSION_SECRET: ${SESSION_SECRET}
+      UPLOAD_DIR: /usr/src/app/uploads
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE}
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./uploads:/usr/src/app/uploads
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:16
+    container_name: postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: attendance_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:alpine
+    container_name: redis_cache
+    restart: always
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

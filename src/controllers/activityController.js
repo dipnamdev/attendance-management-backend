@@ -7,6 +7,7 @@ const heartbeat = async (req, res, next) => {
     const userId = req.user.id;
     const activityData = req.body;
 
+    console.log('Heartbeat payload from client:', activityData); 
     const result = await activityService.processHeartbeat(userId, activityData);
 
     if (result.error) {
@@ -52,8 +53,13 @@ const getCurrentActivity = async (req, res, next) => {
 
 const getActivityHistory = async (req, res, next) => {
   try {
-    const userId = req.user.id;
-    const { date } = req.query;
+    let userId = req.user.id;
+    const { date, user_id } = req.query;
+
+    // If admin and user_id is provided, use that user_id
+    if (req.user.role === 'admin' && user_id) {
+      userId = user_id;
+    }
 
     const history = await activityService.getActivityHistory(userId, date);
 

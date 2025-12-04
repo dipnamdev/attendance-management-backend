@@ -6,7 +6,7 @@ class ReportService {
     const targetDate = date || formatDate(new Date());
 
     const attendance = await pool.query(
-      'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2',
+      'SELECT * FROM attendance_records WHERE user_id = $1 AND date::date = $2::date',
       [userId, targetDate]
     );
 
@@ -42,7 +42,7 @@ class ReportService {
     );
 
     return {
-      attendance: attendance.rows[0],
+      attendance_records: attendance.rows[0],
       activities: activities.rows,
       screenshot_count: parseInt(screenshots.rows[0].count),
       top_applications: activityTracking.rows,
@@ -51,13 +51,13 @@ class ReportService {
     };
   }
 
-  async getWeeklyReport(userId, startDate) {
+  async getWeeklyReport(userId, startDate, endDate) {
     const start = startDate || formatDate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
-    const end = formatDate(new Date());
+    const end = endDate || formatDate(new Date());
 
     const attendance = await pool.query(
       `SELECT * FROM attendance_records 
-       WHERE user_id = $1 AND date >= $2 AND date <= $3
+       WHERE user_id = $1 AND date::date >= $2::date AND date::date <= $3::date
        ORDER BY date DESC`,
       [userId, start, end]
     );
@@ -71,7 +71,7 @@ class ReportService {
          SUM(total_break_duration) as total_break,
          AVG(total_active_duration) as avg_active
        FROM attendance_records
-       WHERE user_id = $1 AND date >= $2 AND date <= $3`,
+       WHERE user_id = $1 AND date::date >= $2::date AND date::date <= $3::date`,
       [userId, start, end]
     );
 
@@ -93,7 +93,7 @@ class ReportService {
 
     const attendance = await pool.query(
       `SELECT * FROM attendance_records 
-       WHERE user_id = $1 AND date >= $2 AND date <= $3
+       WHERE user_id = $1 AND date::date >= $2::date AND date::date <= $3::date
        ORDER BY date DESC`,
       [userId, startDate, endDateStr]
     );
@@ -169,9 +169,10 @@ class ReportService {
          ar.total_idle_duration,
          ar.status
        FROM users u
-       LEFT JOIN attendance_records ar ON u.id = ar.user_id AND ar.date = $1
-       WHERE u.role = 'employee' AND u.status = 'active'
+       LEFT JOIN attendance_records ar ON u.id = ar.user_id AND ar.date::date = $1::date
+       WHERE u.status = 'active'
        ORDER BY u.name`,
+      //  (u.role = 'employee' or u.role = 'hr) AND
       [targetDate]
     );
 

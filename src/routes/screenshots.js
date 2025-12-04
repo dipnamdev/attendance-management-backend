@@ -6,6 +6,7 @@ const { authenticateToken } = require('../middleware/auth');
 router.post('/upload', authenticateToken, screenshotController.uploadScreenshot);
 router.get('/list', authenticateToken, screenshotController.listScreenshots);
 router.get('/:id', authenticateToken, screenshotController.getScreenshot);
+router.get('/:id/file', authenticateToken, screenshotController.serveScreenshotFile);
 router.delete('/:id', authenticateToken, screenshotController.deleteScreenshot);
 
 module.exports = router;

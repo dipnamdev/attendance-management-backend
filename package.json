@@ -7,7 +7,9 @@
     "start": "node src/index.js",
     "dev": "node src/index.js",
     "seed": "node src/utils/seed.js",
-    "migrate": "node src/utils/migrate.js"
+    "migrate": "node src/utils/migrate.js",
+    "setup": "node src/utils/setup.js",
+    "reset:data": "node src/utils/resetData.js"
   },
   "keywords": [
     "attendance",
@@ -21,6 +23,7 @@
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
+    "drizzle-orm": "^0.44.7",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.1",
     "express-validator": "^7.3.0",

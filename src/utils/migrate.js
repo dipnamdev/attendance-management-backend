@@ -1,6 +1,8 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
+const ensureDatabaseExists = require('./ensureDatabase');
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
@@ -23,7 +25,7 @@ CREATE TABLE users (
     password_hash VARCHAR(255) NOT NULL,
     name VARCHAR(255) NOT NULL,
     employee_id VARCHAR(50) UNIQUE NOT NULL,
-    role VARCHAR(20) NOT NULL CHECK (role IN ('employee', 'admin')),
+    role VARCHAR(20) NOT NULL CHECK (role IN ('employee', 'admin', 'hr')),
     profile_picture_url TEXT,
     status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'terminated')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -177,6 +179,7 @@ CREATE INDEX idx_settings_key ON system_settings(setting_key);
 `;
 
 async function runMigration() {
+  await ensureDatabaseExists(process.env.DATABASE_URL);
   const client = await pool.connect();
   try {
     console.log('Starting database migration...');

@@ -207,9 +207,45 @@ const deleteScreenshot = async (req, res, next) => {
   }
 };
 
+const serveScreenshotFile = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { type } = req.query;
+    const userId = req.user.id;
+    const isAdmin = req.user.role === 'admin';
+
+    const query = isAdmin
+      ? 'SELECT * FROM screenshots WHERE id = $1'
+      : 'SELECT * FROM screenshots WHERE id = $1 AND user_id = $2';
+
+    const params = isAdmin ? [id] : [id, userId];
+    const result = await pool.query(query, params);
+
+    if (result.rows.length === 0) {
+      return errorResponse(res, 'SCREENSHOT_NOT_FOUND', 'Screenshot not found', 404);
+    }
+
+    const screenshot = result.rows[0];
+    const filePath =
+      type === 'full'
+        ? screenshot.screenshot_url
+        : screenshot.thumbnail_url || screenshot.screenshot_url;
+
+    if (!filePath) {
+      return errorResponse(res, 'FILE_NOT_FOUND', 'Screenshot file is missing on server', 404);
+    }
+
+    return res.sendFile(path.resolve(filePath));
+  } catch (error) {
+    logger.error('Serve screenshot file error:', error);
+    next(error);
+  }
+};
+
 module.exports = {
   uploadScreenshot,
   listScreenshots,
   getScreenshot,
   deleteScreenshot,
+  serveScreenshotFile,
 };

@@ -5,8 +5,7 @@ const logger = require('../utils/logger');
 const getDailyReport = async (req, res, next) => {
   try {
     const { date, user_id } = req.query;
-    const isAdmin = req.user.role === 'admin';
-    const targetUserId = isAdmin && user_id ? user_id : req.user.id;
+    const targetUserId = user_id ? user_id : req.user.id;
 
     const report = await reportService.getDailyReport(targetUserId, date);
 
@@ -23,11 +22,11 @@ const getDailyReport = async (req, res, next) => {
 
 const getWeeklyReport = async (req, res, next) => {
   try {
-    const { start_date, user_id } = req.query;
-    const isAdmin = req.user.role === 'admin';
-    const targetUserId = isAdmin && user_id ? user_id : req.user.id;
+    const { start_date, end_date, user_id } = req.query;
 
-    const report = await reportService.getWeeklyReport(targetUserId, start_date);
+    const targetUserId = user_id ? user_id : req.user.id;
+
+    const report = await reportService.getWeeklyReport(targetUserId, start_date, end_date);
 
     return successResponse(res, { report });
   } catch (error) {
@@ -39,8 +38,8 @@ const getWeeklyReport = async (req, res, next) => {
 const getMonthlyReport = async (req, res, next) => {
   try {
     const { month, year, user_id } = req.query;
-    const isAdmin = req.user.role === 'admin';
-    const targetUserId = isAdmin && user_id ? user_id : req.user.id;
+
+    const targetUserId = user_id ? user_id : req.user.id;
 
     const report = await reportService.getMonthlyReport(
       targetUserId,
@@ -57,9 +56,12 @@ const getMonthlyReport = async (req, res, next) => {
 
 const getProductivitySummary = async (req, res, next) => {
   try {
+    const allowedRoles = ['admin', 'hr'];
+    const hasAccess = allowedRoles.includes(req.user.role);
+
     const { user_id, period = 'week' } = req.query;
-    const isAdmin = req.user.role === 'admin';
-    const targetUserId = isAdmin && user_id ? user_id : req.user.id;
+    // const isAdmin = req.user.role === 'admin'|| req.user.role === 'hr';
+    const targetUserId = hasAccess && user_id ? user_id : req.user.id;
 
     const summary = await reportService.getProductivitySummary(targetUserId, period);
 
@@ -73,11 +75,6 @@ const getProductivitySummary = async (req, res, next) => {
 const getTeamOverview = async (req, res, next) => {
   try {
     const { date } = req.query;
-
-    if (req.user.role !== 'admin') {
-      return errorResponse(res, 'FORBIDDEN', 'Only admins can access team overview', 403);
-    }
-
     const overview = await reportService.getTeamOverview(date);
 
     return successResponse(res, { overview });

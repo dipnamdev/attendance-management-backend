@@ -8,7 +8,7 @@ const IDLE_THRESHOLD = 300;
 class ActivityService {
   async processHeartbeat(userId, activityData) {
     const { is_active, active_window, active_application, url, mouse_clicks = 0, keyboard_strokes = 0 } = activityData;
-    
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -41,26 +41,49 @@ class ActivityService {
 
       const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
       const now = Date.now();
-      
+
       if (cachedActivity) {
         const lastActivity = JSON.parse(cachedActivity);
         const timeSinceLastActivity = (now - lastActivity.timestamp) / 1000;
 
-        if (timeSinceLastActivity >= IDLE_THRESHOLD && lastActivity.is_active && !is_active) {
+        // Case 1: Transition from Active to Idle
+        // Occurs if:
+        // a) Time threshold exceeded (Standard Idle)
+        // b) Explicit "is_active: false" received while previously active (System Suspend/Lock/User Idle)
+        if ((timeSinceLastActivity >= IDLE_THRESHOLD || !is_active) && lastActivity.is_active) {
+
+          // If explicit idle signal (time < threshold), end active session NOW.
+          // If timeout (time >= threshold), backdate end time by threshold.
+          const endTimeExpression = (timeSinceLastActivity < IDLE_THRESHOLD && !is_active)
+            ? 'NOW()'
+            : `NOW() - INTERVAL '${IDLE_THRESHOLD} seconds'`;
+
+          const durationExpression = (timeSinceLastActivity < IDLE_THRESHOLD && !is_active)
+            ? 'EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER'
+            : `EXTRACT(EPOCH FROM (NOW() - INTERVAL '${IDLE_THRESHOLD} seconds' - start_time))::INTEGER`;
+
           await client.query(
             `UPDATE activity_logs 
-             SET end_time = NOW() - INTERVAL '${IDLE_THRESHOLD} seconds', 
-                 duration = EXTRACT(EPOCH FROM (NOW() - INTERVAL '${IDLE_THRESHOLD} seconds' - start_time))::INTEGER
+             SET end_time = ${endTimeExpression}, 
+                 duration = ${durationExpression}
              WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL AND activity_type = 'active'`,
             [userId, attendance.id]
           );
 
+          // Start the Idle log
+          // If explicit idle, start NOW. If timeout, start backdated.
+          const startTimeExpression = (timeSinceLastActivity < IDLE_THRESHOLD && !is_active)
+            ? 'NOW()'
+            : `NOW() - INTERVAL '${IDLE_THRESHOLD} seconds'`;
+
           await client.query(
             `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-             VALUES ($1, $2, 'idle', NOW() - INTERVAL '${IDLE_THRESHOLD} seconds')`,
+             VALUES ($1, $2, 'idle', ${startTimeExpression})`,
             [userId, attendance.id]
           );
+
         } else if (lastActivity.is_active === false && is_active) {
+          // Case 2: Transition from Idle to Active
           await client.query(
             `UPDATE activity_logs 
              SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
@@ -111,17 +134,89 @@ class ActivityService {
 
   async getActivityHistory(userId, date) {
     const targetDate = date || formatDate(new Date());
-    
+
+    // Fetch raw tracking data joined with attendance records to filter by date
     const result = await pool.query(
-      `SELECT al.*, ar.date 
-       FROM activity_logs al
-       JOIN attendance_records ar ON al.attendance_record_id = ar.id
-       WHERE al.user_id = $1 AND ar.date = $2
-       ORDER BY al.start_time ASC`,
+      `SELECT uat.* 
+       FROM user_activity_tracking uat
+       JOIN attendance_records ar ON uat.attendance_record_id = ar.id
+       WHERE uat.user_id = $1 AND ar.date = $2
+       ORDER BY uat.timestamp ASC`,
       [userId, targetDate]
     );
 
-    return result.rows;
+    const rawLogs = result.rows;
+    const aggregatedLogs = [];
+
+    if (rawLogs.length === 0) return [];
+
+    let currentGroup = null;
+
+    for (let i = 0; i < rawLogs.length; i++) {
+      const log = rawLogs[i];
+      const nextLog = rawLogs[i + 1];
+
+      // Calculate duration for this heartbeat
+      let duration = 0;
+      if (nextLog) {
+        const diff = (new Date(nextLog.timestamp) - new Date(log.timestamp)) / 1000;
+        // If gap is less than 5 minutes, consider it part of the session. 
+        // Otherwise, it's a gap (stop/offline), so cap the duration of this last heartbeat.
+        if (diff < 300) {
+          duration = diff;
+        } else {
+          duration = 30; // Default heartbeat interval assumption
+        }
+      } else {
+        duration = 30; // Default for the very last log
+      }
+
+      const isIdle = !log.is_active;
+      // If idle, we might want to group them as "Idle" regardless of app, 
+      // or show the app but mark as idle. 
+      // The UI shows activity_type 'active'/'idle'.
+      // Let's group by app/window too, but break if activity_type changes.
+
+      const activityType = isIdle ? 'idle' : 'active';
+      const appName = log.active_application || 'Unknown';
+      const windowTitle = log.active_window_title || '-';
+
+      if (currentGroup &&
+        currentGroup.active_application === appName &&
+        currentGroup.active_window_title === windowTitle &&
+        currentGroup.activity_type === activityType
+      ) {
+        // Continue group
+        currentGroup.duration += duration;
+        currentGroup.mouse_clicks += (log.mouse_clicks || 0);
+        currentGroup.keyboard_strokes += (log.keyboard_strokes || 0);
+        // Update end time
+        currentGroup.end_time = new Date(new Date(currentGroup.start_time).getTime() + currentGroup.duration * 1000);
+      } else {
+        // Push previous group
+        if (currentGroup) {
+          aggregatedLogs.push(currentGroup);
+        }
+        // Start new group
+        currentGroup = {
+          start_time: log.timestamp,
+          end_time: new Date(new Date(log.timestamp).getTime() + duration * 1000),
+          active_application: appName,
+          active_window_title: windowTitle,
+          duration: duration,
+          activity_type: activityType,
+          mouse_clicks: log.mouse_clicks || 0,
+          keyboard_strokes: log.keyboard_strokes || 0
+        };
+      }
+    }
+
+    // Push the last group
+    if (currentGroup) {
+      aggregatedLogs.push(currentGroup);
+    }
+
+    return aggregatedLogs;
   }
 
   async startLunchBreak(userId, location = null) {
@@ -137,6 +232,7 @@ class ActivityService {
 
       if (attendanceResult.rows.length === 0) {
         await client.query('ROLLBACK');
+        logger.error(`startLunchBreak: No attendance record found for user ${userId} on ${today}`);
         return { error: 'NOT_CHECKED_IN', message: 'Please check in first' };
       }
 
@@ -149,6 +245,7 @@ class ActivityService {
 
       if (existingBreak.rows.length > 0) {
         await client.query('ROLLBACK');
+        logger.error(`startLunchBreak: Break already started for user ${userId}, breakId: ${existingBreak.rows[0].id}`);
         return { error: 'BREAK_ALREADY_STARTED', message: 'Lunch break already in progress' };
       }
 
