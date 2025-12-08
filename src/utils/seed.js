@@ -27,7 +27,7 @@ async function seedData() {
     }
 
     const employees = [
-      { email: '0112@gmail.com', name: 'CwS User', employee_id: 'EMP001' },
+      { email: '0112@gmail.com', name: 'CwS User', employee_id: 'EMP002' },
     ];
 
     for (const employee of employees) {

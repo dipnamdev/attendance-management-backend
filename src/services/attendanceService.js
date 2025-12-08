@@ -297,12 +297,19 @@ class AttendanceService {
       totalWork = totalElapsed - totalBreak;
     }
 
+    // Calculate tracked time (when app was running and sending heartbeats)
+    const trackedTime = totalActive + totalIdle;
+    // Untracked time is when the app was closed (no heartbeats sent)
+    const untrackedTime = Math.max(0, totalWork - trackedTime);
+
     return {
       ...attendance,
       total_time: totalWork > 0 ? totalWork : 0,
       active_time: totalActive,
       idle_time: totalIdle,
-      break_time: totalBreak
+      break_time: totalBreak,
+      tracked_time: trackedTime,
+      untracked_time: untrackedTime
     };
   }
 
@@ -427,13 +434,20 @@ class AttendanceService {
       const totalElapsed = Math.floor((effectiveEndTime - new Date(record.check_in_time)) / 1000);
       const totalWork = totalElapsed - totalBreak;
 
+      // Calculate tracked time (when app was running)
+      const trackedTime = totalActive + totalIdle;
+      // Untracked time is when the app was closed
+      const untrackedTime = Math.max(0, totalWork - trackedTime);
+
       // Return record with calculated real-time durations
       return {
         ...record,
         total_work_duration: totalWork > 0 ? totalWork : 0,
         total_active_duration: totalActive,
         total_idle_duration: totalIdle,
-        total_break_duration: totalBreak
+        total_break_duration: totalBreak,
+        tracked_time: trackedTime,
+        untracked_time: untrackedTime
       };
     }));
 

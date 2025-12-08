@@ -167,9 +167,12 @@ class ReportService {
          ar.total_work_duration,
          ar.total_active_duration,
          ar.total_idle_duration,
-         ar.status
+         ar.status,
+         lb.break_start_time,
+         lb.break_end_time
        FROM users u
        LEFT JOIN attendance_records ar ON u.id = ar.user_id AND ar.date::date = $1::date
+       LEFT JOIN lunch_breaks lb ON ar.id = lb.attendance_record_id AND lb.break_end_time IS NULL
        WHERE u.status = 'active'
        ORDER BY u.name`,
       //  (u.role = 'employee' or u.role = 'hr) AND
