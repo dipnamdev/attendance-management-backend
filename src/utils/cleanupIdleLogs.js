@@ -5,24 +5,29 @@ const logger = require('./logger');
  * Clean up incorrect idle logs
  * 
  * This script removes idle logs that were created incorrectly due to the old
- * idle detection logic. It removes idle logs that are shorter than 5 minutes
- * (300 seconds) since those should never have been created.
+ * idle detection logic. Since the old logic was creating idle logs immediately
+ * on any brief pause, we'll delete ALL idle logs from today and let the fixed
+ * logic create new ones correctly.
  */
 async function cleanupIncorrectIdleLogs() {
     const client = await pool.connect();
     try {
         console.log('Starting cleanup of incorrect idle logs...');
 
-        // Find and delete idle logs shorter than 5 minutes (300 seconds)
+        // Get today's date
+        const today = new Date().toISOString().split('T')[0];
+        console.log(`Cleaning up idle logs for date: ${today}`);
+
+        // Delete ALL idle logs from today since they were created by buggy logic
         const result = await client.query(
             `DELETE FROM activity_logs 
        WHERE activity_type = 'idle' 
-       AND duration IS NOT NULL 
-       AND duration < 300
-       RETURNING id, user_id, duration`
+       AND DATE(start_time) = $1
+       RETURNING id, user_id, duration`,
+            [today]
         );
 
-        console.log(`Deleted ${result.rowCount} incorrect idle logs`);
+        console.log(`Deleted ${result.rowCount} idle logs from today`);
 
         if (result.rowCount > 0) {
             console.log('Sample deleted logs:');
@@ -31,30 +36,8 @@ async function cleanupIncorrectIdleLogs() {
             });
         }
 
-        // Also close any open idle logs that have been running for less than 5 minutes
-        const openIdleResult = await client.query(
-            `UPDATE activity_logs 
-       SET end_time = NOW(), 
-           duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
-       WHERE activity_type = 'idle' 
-       AND end_time IS NULL 
-       AND EXTRACT(EPOCH FROM (NOW() - start_time)) < 300
-       RETURNING id, user_id`
-        );
-
-        if (openIdleResult.rowCount > 0) {
-            console.log(`Closed ${openIdleResult.rowCount} open idle logs that were less than 5 minutes`);
-
-            // Now delete them since they shouldn't exist
-            await client.query(
-                `DELETE FROM activity_logs 
-         WHERE id = ANY($1)`,
-                [openIdleResult.rows.map(r => r.id)]
-            );
-            console.log(`Deleted those ${openIdleResult.rowCount} logs`);
-        }
-
         console.log('Cleanup completed successfully!');
+        console.log('Users should Mark Out and Mark In again to start fresh with the fixed logic.');
         process.exit(0);
     } catch (error) {
         console.error('Error during cleanup:', error);

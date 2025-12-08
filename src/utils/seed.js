@@ -27,10 +27,10 @@ async function seedData() {
     }
 
     const employees = [
-      { email: 'test1mail.com', name: 'Test1 Dipesh', employee_id: 'EMP011' },
-      { email: 'test2mail.com', name: 'Test2 Prerit', employee_id: 'EMP012' },
-      { email: 'test3mail.com', name: 'Test3 User', employee_id: 'EMP013' },
-      { email: 'test4mail.com', name: 'Test4 Akshay', employee_id: 'EMP014' },
+      { email: 'test1@gmail.com', name: 'Test1 Dipesh', employee_id: 'EMP011' },
+      { email: 'test2@gmail.com', name: 'Test2 Prerit', employee_id: 'EMP012' },
+      { email: 'test3@gmail.com', name: 'Test3 User', employee_id: 'EMP013' },
+      { email: 'test4@gmail.com', name: 'Test4 Akshay', employee_id: 'EMP014' },
     ];
 
     for (const employee of employees) {
