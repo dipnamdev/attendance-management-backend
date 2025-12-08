@@ -12,7 +12,7 @@ async function seedData() {
     logger.info('Starting data seeding...');
 
     const adminPassword = await bcrypt.hash('admin123', 10);
-    const employeePassword = await bcrypt.hash('employee123', 10);
+    const employeePassword = await bcrypt.hash('Roopesh_123', 10);
 
     const adminResult = await client.query(
       `INSERT INTO users (email, password_hash, name, employee_id, role) 
@@ -27,7 +27,10 @@ async function seedData() {
     }
 
     const employees = [
-      { email: '0112@gmail.com', name: 'CwS User', employee_id: 'EMP002' },
+      { email: 'test1mail.com', name: 'Test1 Dipesh', employee_id: 'EMP011' },
+      { email: 'test2mail.com', name: 'Test2 Prerit', employee_id: 'EMP012' },
+      { email: 'test3mail.com', name: 'Test3 User', employee_id: 'EMP013' },
+      { email: 'test4mail.com', name: 'Test4 Akshay', employee_id: 'EMP014' },
     ];
 
     for (const employee of employees) {

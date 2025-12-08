@@ -47,20 +47,11 @@ class ActivityService {
         const timeSinceLastActivity = (now - lastActivity.timestamp) / 1000;
 
         // Case 1: Transition from Active to Idle
-        // Occurs if:
-        // a) Time threshold exceeded (Standard Idle)
-        // b) Explicit "is_active: false" received while previously active (System Suspend/Lock/User Idle)
-        if ((timeSinceLastActivity >= IDLE_THRESHOLD || !is_active) && lastActivity.is_active) {
-
-          // If explicit idle signal (time < threshold), end active session NOW.
-          // If timeout (time >= threshold), backdate end time by threshold.
-          const endTimeExpression = (timeSinceLastActivity < IDLE_THRESHOLD && !is_active)
-            ? 'NOW()'
-            : `NOW() - INTERVAL '${IDLE_THRESHOLD} seconds'`;
-
-          const durationExpression = (timeSinceLastActivity < IDLE_THRESHOLD && !is_active)
-            ? 'EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER'
-            : `EXTRACT(EPOCH FROM (NOW() - INTERVAL '${IDLE_THRESHOLD} seconds' - start_time))::INTEGER`;
+        // Only occurs if time threshold exceeded (5 minutes of no heartbeats)
+        if (timeSinceLastActivity >= IDLE_THRESHOLD && lastActivity.is_active) {
+          // Backdate end time by threshold
+          const endTimeExpression = `NOW() - INTERVAL '${IDLE_THRESHOLD} seconds'`;
+          const durationExpression = `EXTRACT(EPOCH FROM (NOW() - INTERVAL '${IDLE_THRESHOLD} seconds' - start_time))::INTEGER`;
 
           await client.query(
             `UPDATE activity_logs 
@@ -70,11 +61,8 @@ class ActivityService {
             [userId, attendance.id]
           );
 
-          // Start the Idle log
-          // If explicit idle, start NOW. If timeout, start backdated.
-          const startTimeExpression = (timeSinceLastActivity < IDLE_THRESHOLD && !is_active)
-            ? 'NOW()'
-            : `NOW() - INTERVAL '${IDLE_THRESHOLD} seconds'`;
+          // Start the Idle log (backdated to 5 minutes ago)
+          const startTimeExpression = `NOW() - INTERVAL '${IDLE_THRESHOLD} seconds'`;
 
           await client.query(
             `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
