@@ -114,3 +114,5 @@ services:
 
 volumes:
   postgres_data:
+    external: true
+    name: attendance-management-backend_postgres_data

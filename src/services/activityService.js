@@ -7,7 +7,15 @@ const IDLE_THRESHOLD = 300;
 
 class ActivityService {
   async processHeartbeat(userId, activityData) {
-    const { is_active, active_window, active_application, url, mouse_clicks = 0, keyboard_strokes = 0 } = activityData;
+    const {
+      is_active,
+      active_window,
+      active_application,
+      url,
+      mouse_clicks = 0,
+      keyboard_strokes = 0,
+      idle_time_seconds = 0
+    } = activityData;
 
     const client = await pool.connect();
     try {
@@ -55,6 +63,8 @@ class ActivityService {
       if (cachedActivity) {
         const lastActivity = JSON.parse(cachedActivity);
         const timeSinceLastActivity = (now - lastActivity.timestamp) / 1000;
+        const backdateSeconds = Math.min(IDLE_THRESHOLD, idle_time_seconds || IDLE_THRESHOLD);
+        const backdateInterval = `INTERVAL '${backdateSeconds} seconds'`;
 
         // Case 1: Transition from Active to Idle
         // This happens when:
@@ -66,7 +76,7 @@ class ActivityService {
           if (currentActivity && currentActivity.activity_type === 'active') {
             await client.query(
               `UPDATE activity_logs 
-               SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
+               SET end_time = NOW() - ${backdateInterval}, duration = EXTRACT(EPOCH FROM (NOW() - ${backdateInterval} - start_time))::INTEGER
                WHERE id = $1`,
               [currentActivity.id]
             );
@@ -75,15 +85,15 @@ class ActivityService {
           // Start a new idle log
           await client.query(
             `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-             VALUES ($1, $2, 'idle', NOW())`,
+             VALUES ($1, $2, 'idle', NOW() - ${backdateInterval})`,
             [userId, attendance.id]
           );
 
         } else if (timeSinceLastActivity >= IDLE_THRESHOLD && lastActivity.is_active) {
           // Case 1b: Gap of 5+ minutes between heartbeats (app was closed/offline)
           // Backdate end time by threshold
-          const endTimeExpression = `NOW() - INTERVAL '${IDLE_THRESHOLD} seconds'`;
-          const durationExpression = `EXTRACT(EPOCH FROM (NOW() - INTERVAL '${IDLE_THRESHOLD} seconds' - start_time))::INTEGER`;
+          const endTimeExpression = `NOW() - ${backdateInterval}`;
+          const durationExpression = `EXTRACT(EPOCH FROM (NOW() - ${backdateInterval} - start_time))::INTEGER`;
 
           await client.query(
             `UPDATE activity_logs 
@@ -94,7 +104,7 @@ class ActivityService {
           );
 
           // Start the Idle log (backdated to 5 minutes ago)
-          const startTimeExpression = `NOW() - INTERVAL '${IDLE_THRESHOLD} seconds'`;
+          const startTimeExpression = `NOW() - ${backdateInterval}`;
 
           await client.query(
             `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
@@ -126,9 +136,24 @@ class ActivityService {
       } else {
         // First heartbeat - create initial activity log based on is_active flag
         if (!currentActivity) {
+          const backdateSeconds = Math.min(IDLE_THRESHOLD, idle_time_seconds || IDLE_THRESHOLD);
+          const startTimeExpression = is_active
+            ? 'NOW()'
+            : `NOW() - INTERVAL '${backdateSeconds} seconds'`;
+
+          // Close any existing open active log if we're starting in idle
+          if (!is_active) {
+            await client.query(
+              `UPDATE activity_logs 
+               SET end_time = ${startTimeExpression}, duration = EXTRACT(EPOCH FROM (${startTimeExpression} - start_time))::INTEGER
+               WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL AND activity_type = 'active'`,
+              [userId, attendance.id]
+            );
+          }
+
           await client.query(
             `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-             VALUES ($1, $2, $3, NOW())`,
+             VALUES ($1, $2, $3, ${startTimeExpression})`,
             [userId, attendance.id, is_active ? 'active' : 'idle']
           );
         }
