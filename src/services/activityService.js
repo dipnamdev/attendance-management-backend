@@ -42,13 +42,45 @@ class ActivityService {
       const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
       const now = Date.now();
 
+      // Get current activity log to check if we need to handle state transitions
+      const currentActivityResult = await client.query(
+        `SELECT * FROM activity_logs 
+         WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL 
+         ORDER BY start_time DESC LIMIT 1`,
+        [userId, attendance.id]
+      );
+
+      const currentActivity = currentActivityResult.rows[0];
+
       if (cachedActivity) {
         const lastActivity = JSON.parse(cachedActivity);
         const timeSinceLastActivity = (now - lastActivity.timestamp) / 1000;
 
         // Case 1: Transition from Active to Idle
-        // Only occurs if time threshold exceeded (5 minutes of no heartbeats)
-        if (timeSinceLastActivity >= IDLE_THRESHOLD && lastActivity.is_active) {
+        // This happens when:
+        // a) User was active and now is idle (based on is_active flag), OR
+        // b) There's a gap of 5+ minutes between heartbeats (app was closed/offline)
+        if (lastActivity.is_active && !is_active) {
+          // User transitioned from active to idle based on is_active flag
+          // Close the current active log if it exists
+          if (currentActivity && currentActivity.activity_type === 'active') {
+            await client.query(
+              `UPDATE activity_logs 
+               SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
+               WHERE id = $1`,
+              [currentActivity.id]
+            );
+          }
+
+          // Start a new idle log
+          await client.query(
+            `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+             VALUES ($1, $2, 'idle', NOW())`,
+            [userId, attendance.id]
+          );
+
+        } else if (timeSinceLastActivity >= IDLE_THRESHOLD && lastActivity.is_active) {
+          // Case 1b: Gap of 5+ minutes between heartbeats (app was closed/offline)
           // Backdate end time by threshold
           const endTimeExpression = `NOW() - INTERVAL '${IDLE_THRESHOLD} seconds'`;
           const durationExpression = `EXTRACT(EPOCH FROM (NOW() - INTERVAL '${IDLE_THRESHOLD} seconds' - start_time))::INTEGER`;
@@ -70,19 +102,34 @@ class ActivityService {
             [userId, attendance.id]
           );
 
-        } else if (lastActivity.is_active === false && is_active) {
+        } else if (!lastActivity.is_active && is_active) {
           // Case 2: Transition from Idle to Active
-          await client.query(
-            `UPDATE activity_logs 
-             SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
-             WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL AND activity_type = 'idle'`,
-            [userId, attendance.id]
-          );
+          // Close the current idle log if it exists
+          if (currentActivity && currentActivity.activity_type === 'idle') {
+            await client.query(
+              `UPDATE activity_logs 
+               SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
+               WHERE id = $1`,
+              [currentActivity.id]
+            );
+          }
 
+          // Start a new active log
           await client.query(
             `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
              VALUES ($1, $2, 'active', NOW())`,
             [userId, attendance.id]
+          );
+        }
+        // Case 3: Continuing in same state (active->active or idle->idle)
+        // No action needed - existing log remains open
+      } else {
+        // First heartbeat - create initial activity log based on is_active flag
+        if (!currentActivity) {
+          await client.query(
+            `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+             VALUES ($1, $2, $3, NOW())`,
+            [userId, attendance.id, is_active ? 'active' : 'idle']
           );
         }
       }

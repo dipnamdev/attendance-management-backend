@@ -253,6 +253,13 @@ class AttendanceService {
       let duration = log.duration || 0;
       if (!log.end_time && log.start_time) {
         duration = Math.floor((now - new Date(log.start_time)) / 1000);
+        // Cap ongoing idle logs to prevent excessive accumulation
+        // If idle log is ongoing for more than 24 hours, cap it
+        const MAX_IDLE_DURATION = 24 * 60 * 60; // 24 hours in seconds
+        if (log.activity_type === 'idle' && duration > MAX_IDLE_DURATION) {
+          logger.warn(`Ongoing idle log duration (${duration}s) exceeds maximum (${MAX_IDLE_DURATION}s), capping it for attendance ${attendance.id}`);
+          duration = MAX_IDLE_DURATION;
+        }
       }
 
       if (log.activity_type === 'active') {
@@ -297,6 +304,13 @@ class AttendanceService {
       totalWork = totalElapsed - totalBreak;
     }
 
+    // Safeguard: Idle time should never exceed total work time
+    // If it does, cap idle time
+    if (totalIdle > totalWork && totalWork > 0) {
+      logger.warn(`Idle time (${totalIdle}s) exceeds total work time (${totalWork}s) for attendance ${attendance.id}, capping idle time`);
+      totalIdle = totalWork;
+    }
+    
     // Calculate tracked time (when app was running and sending heartbeats)
     const trackedTime = totalActive + totalIdle;
     // Untracked time is when the app was closed (no heartbeats sent)
@@ -390,6 +404,13 @@ class AttendanceService {
         let duration = log.duration || 0;
         if (!log.end_time && log.start_time) {
           duration = Math.floor((effectiveEndTime - new Date(log.start_time)) / 1000);
+          // Cap ongoing idle logs to prevent excessive accumulation
+          // If idle log is ongoing for more than 24 hours, cap it
+          const MAX_IDLE_DURATION = 24 * 60 * 60; // 24 hours in seconds
+          if (log.activity_type === 'idle' && duration > MAX_IDLE_DURATION) {
+            logger.warn(`Ongoing idle log duration (${duration}s) exceeds maximum (${MAX_IDLE_DURATION}s), capping it for record ${record.id}`);
+            duration = MAX_IDLE_DURATION;
+          }
         }
 
         if (log.activity_type === 'active') {
@@ -433,6 +454,13 @@ class AttendanceService {
       // Calculate total work time: (check-in to effective end) minus breaks
       const totalElapsed = Math.floor((effectiveEndTime - new Date(record.check_in_time)) / 1000);
       const totalWork = totalElapsed - totalBreak;
+
+      // Safeguard: Idle time should never exceed total work time
+      // If it does, cap idle time
+      if (totalIdle > totalWork && totalWork > 0) {
+        logger.warn(`Idle time (${totalIdle}s) exceeds total work time (${totalWork}s) for record ${record.id}, capping idle time`);
+        totalIdle = totalWork;
+      }
 
       // Calculate tracked time (when app was running)
       const trackedTime = totalActive + totalIdle;
