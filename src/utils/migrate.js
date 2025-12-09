@@ -8,18 +8,8 @@ const pool = new Pool({
 });
 
 const migration = `
--- Drop existing tables if they exist (in correct order due to foreign keys)
-DROP TABLE IF EXISTS productivity_summary CASCADE;
-DROP TABLE IF EXISTS screenshots CASCADE;
-DROP TABLE IF EXISTS user_activity_tracking CASCADE;
-DROP TABLE IF EXISTS activity_logs CASCADE;
-DROP TABLE IF EXISTS lunch_breaks CASCADE;
-DROP TABLE IF EXISTS attendance_records CASCADE;
-DROP TABLE IF EXISTS system_settings CASCADE;
-DROP TABLE IF EXISTS users CASCADE;
-
--- Create users table
-CREATE TABLE users (
+-- Create users table if it doesn't exist
+CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
@@ -32,8 +22,8 @@ CREATE TABLE users (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create attendance_records table
-CREATE TABLE attendance_records (
+-- Create attendance_records table if it doesn't exist
+CREATE TABLE IF NOT EXISTS attendance_records (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     date DATE NOT NULL,
@@ -54,8 +44,8 @@ CREATE TABLE attendance_records (
     CONSTRAINT unique_user_date UNIQUE(user_id, date)
 );
 
--- Create activity_logs table
-CREATE TABLE activity_logs (
+-- Create activity_logs table if it doesn't exist
+CREATE TABLE IF NOT EXISTS activity_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     attendance_record_id UUID REFERENCES attendance_records(id) ON DELETE CASCADE,
@@ -67,8 +57,8 @@ CREATE TABLE activity_logs (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create user_activity_tracking table
-CREATE TABLE user_activity_tracking (
+-- Create user_activity_tracking table if it doesn't exist
+CREATE TABLE IF NOT EXISTS user_activity_tracking (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     attendance_record_id UUID REFERENCES attendance_records(id) ON DELETE CASCADE,
@@ -84,8 +74,8 @@ CREATE TABLE user_activity_tracking (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create screenshots table
-CREATE TABLE screenshots (
+-- Create screenshots table if it doesn't exist
+CREATE TABLE IF NOT EXISTS screenshots (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     attendance_record_id UUID REFERENCES attendance_records(id) ON DELETE CASCADE,
@@ -102,8 +92,8 @@ CREATE TABLE screenshots (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create lunch_breaks table
-CREATE TABLE lunch_breaks (
+-- Create lunch_breaks table if it doesn't exist
+CREATE TABLE IF NOT EXISTS lunch_breaks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     attendance_record_id UUID NOT NULL REFERENCES attendance_records(id) ON DELETE CASCADE,
@@ -116,8 +106,8 @@ CREATE TABLE lunch_breaks (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create productivity_summary table
-CREATE TABLE productivity_summary (
+-- Create productivity_summary table if it doesn't exist
+CREATE TABLE IF NOT EXISTS productivity_summary (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     date DATE NOT NULL,
@@ -136,8 +126,8 @@ CREATE TABLE productivity_summary (
     CONSTRAINT unique_user_date_summary UNIQUE(user_id, date)
 );
 
--- Create system_settings table
-CREATE TABLE system_settings (
+-- Create system_settings table if it doesn't exist
+CREATE TABLE IF NOT EXISTS system_settings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     setting_key VARCHAR(100) UNIQUE NOT NULL,
     setting_value JSONB NOT NULL,
@@ -146,36 +136,36 @@ CREATE TABLE system_settings (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create indexes for better query performance
-CREATE INDEX idx_users_email ON users(email);
-CREATE INDEX idx_users_employee_id ON users(employee_id);
-CREATE INDEX idx_users_role ON users(role);
-CREATE INDEX idx_users_status ON users(status);
+-- Create indexes for better query performance (only if they don't exist)
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_employee_id ON users(employee_id);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 
-CREATE INDEX idx_attendance_user_id ON attendance_records(user_id);
-CREATE INDEX idx_attendance_date ON attendance_records(date);
-CREATE INDEX idx_attendance_user_date ON attendance_records(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_attendance_user_id ON attendance_records(user_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance_records(date);
+CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance_records(user_id, date);
 
-CREATE INDEX idx_activity_logs_user_id ON activity_logs(user_id);
-CREATE INDEX idx_activity_logs_attendance_id ON activity_logs(attendance_record_id);
-CREATE INDEX idx_activity_logs_start_time ON activity_logs(start_time);
-CREATE INDEX idx_activity_logs_type ON activity_logs(activity_type);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_user_id ON activity_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_attendance_id ON activity_logs(attendance_record_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_start_time ON activity_logs(start_time);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_type ON activity_logs(activity_type);
 
-CREATE INDEX idx_user_activity_user_id ON user_activity_tracking(user_id);
-CREATE INDEX idx_user_activity_attendance_id ON user_activity_tracking(attendance_record_id);
-CREATE INDEX idx_user_activity_timestamp ON user_activity_tracking(timestamp);
+CREATE INDEX IF NOT EXISTS idx_user_activity_user_id ON user_activity_tracking(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_activity_attendance_id ON user_activity_tracking(attendance_record_id);
+CREATE INDEX IF NOT EXISTS idx_user_activity_timestamp ON user_activity_tracking(timestamp);
 
-CREATE INDEX idx_screenshots_user_id ON screenshots(user_id);
-CREATE INDEX idx_screenshots_attendance_id ON screenshots(attendance_record_id);
-CREATE INDEX idx_screenshots_timestamp ON screenshots(timestamp);
+CREATE INDEX IF NOT EXISTS idx_screenshots_user_id ON screenshots(user_id);
+CREATE INDEX IF NOT EXISTS idx_screenshots_attendance_id ON screenshots(attendance_record_id);
+CREATE INDEX IF NOT EXISTS idx_screenshots_timestamp ON screenshots(timestamp);
 
-CREATE INDEX idx_lunch_breaks_user_id ON lunch_breaks(user_id);
-CREATE INDEX idx_lunch_breaks_attendance_id ON lunch_breaks(attendance_record_id);
+CREATE INDEX IF NOT EXISTS idx_lunch_breaks_user_id ON lunch_breaks(user_id);
+CREATE INDEX IF NOT EXISTS idx_lunch_breaks_attendance_id ON lunch_breaks(attendance_record_id);
 
-CREATE INDEX idx_productivity_user_id ON productivity_summary(user_id);
-CREATE INDEX idx_productivity_date ON productivity_summary(date);
+CREATE INDEX IF NOT EXISTS idx_productivity_user_id ON productivity_summary(user_id);
+CREATE INDEX IF NOT EXISTS idx_productivity_date ON productivity_summary(date);
 
-CREATE INDEX idx_settings_key ON system_settings(setting_key);
+CREATE INDEX IF NOT EXISTS idx_settings_key ON system_settings(setting_key);
 `;
 
 async function runMigration() {
