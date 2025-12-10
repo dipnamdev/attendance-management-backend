@@ -1,6 +1,22 @@
 const pool = require('../config/database');
 const logger = require('../utils/logger');
 
+function clampDurations(totalWork, totalActive, totalIdle) {
+        const work = Math.max(0, totalWork || 0);
+        let active = Math.max(0, totalActive || 0);
+        let idle = Math.max(0, totalIdle || 0);
+        if (work === 0) return { totalWork: 0, totalActive: 0, totalIdle: 0 };
+        const sum = active + idle;
+        if (sum > work) {
+                const excess = sum - work;
+                const newIdle = Math.max(0, idle - excess); // trim idle first
+                const remainingExcess = Math.max(0, excess - (idle - newIdle));
+                const newActive = Math.max(0, active - remainingExcess);
+                return { totalWork: work, totalActive: newActive, totalIdle: newIdle };
+        }
+        return { totalWork: work, totalActive: active, totalIdle: idle };
+}
+
 async function autoCheckOutUsers(targetDate) {
         const client = await pool.connect();
 
@@ -88,6 +104,7 @@ async function autoCheckOutUsers(targetDate) {
                                 // Calculate total work: from check-in to end of day, minus breaks
                                 const totalElapsed = Math.floor((recordEndOfDay - new Date(record.check_in_time)) / 1000);
                                 const totalWork = totalElapsed - totalBreak;
+                                const clamped = clampDurations(totalWork, totalActive, totalIdle);
 
                                 // 4. Update attendance record
                                 await client.query(`
@@ -99,7 +116,7 @@ async function autoCheckOutUsers(targetDate) {
                             total_break_duration = $5,
                             updated_at = NOW()
                     WHERE id = $6
-                `, [recordEndOfDay, totalWork, totalActive, totalIdle, totalBreak, record.id]);
+                `, [recordEndOfDay, clamped.totalWork, clamped.totalActive, clamped.totalIdle, totalBreak, record.id]);
 
                                 await client.query('COMMIT');
                                 const userIdDisplay = record.user_id ? String(record.user_id).substring(0, 8) : 'unknown';

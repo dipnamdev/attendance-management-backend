@@ -3,6 +3,28 @@ const { redisClient } = require('../config/redis');
 const { calculateDuration, formatDate } = require('../utils/helpers');
 const logger = require('../utils/logger');
 
+// Helper to enforce invariants and prevent runaway sums
+function clampDurations(totalWork, totalActive, totalIdle) {
+  const work = Math.max(0, totalWork || 0);
+  let active = Math.max(0, totalActive || 0);
+  let idle = Math.max(0, totalIdle || 0);
+
+  if (work === 0) {
+    return { totalWork: 0, totalActive: 0, totalIdle: 0 };
+  }
+
+  const sum = active + idle;
+  if (sum > work) {
+    const excess = sum - work;
+    const newIdle = Math.max(0, idle - excess); // trim idle first
+    const remainingExcess = Math.max(0, excess - (idle - newIdle));
+    const newActive = Math.max(0, active - remainingExcess);
+    return { totalWork: work, totalActive: newActive, totalIdle: newIdle };
+  }
+
+  return { totalWork: work, totalActive: active, totalIdle: idle };
+}
+
 class AttendanceService {
   async checkIn(userId, ipAddress, location = null) {
     const client = await pool.connect();
@@ -178,6 +200,8 @@ class AttendanceService {
       const totalElapsed = calculateDuration(attendance.check_in_time, new Date());
       const totalWork = totalElapsed - totalBreak;
 
+      const clamped = clampDurations(totalWork, totalActive, totalIdle);
+
       logger.info(`Duration calculations for user ${userId}: elapsed=${totalElapsed}s, work=${totalWork}s, active=${totalActive}s, idle=${totalIdle}s, break=${totalBreak}s`);
 
       const updatedAttendance = await client.query(
@@ -192,7 +216,7 @@ class AttendanceService {
              updated_at = NOW()
          WHERE id = $7 
          RETURNING *`,
-        [ipAddress, location ? JSON.stringify(location) : null, totalWork, totalActive, totalIdle, totalBreak, attendance.id]
+        [ipAddress, location ? JSON.stringify(location) : null, clamped.totalWork, clamped.totalActive, clamped.totalIdle, totalBreak, attendance.id]
       );
 
       await redisClient.del(`user:${userId}:attendance`);
@@ -304,12 +328,11 @@ class AttendanceService {
       totalWork = totalElapsed - totalBreak;
     }
 
-    // Safeguard: Idle time should never exceed total work time
-    // If it does, cap idle time
-    if (totalIdle > totalWork && totalWork > 0) {
-      logger.warn(`Idle time (${totalIdle}s) exceeds total work time (${totalWork}s) for attendance ${attendance.id}, capping idle time`);
-      totalIdle = totalWork;
-    }
+    // Enforce invariants: active+idle must not exceed totalWork
+    const clamped = clampDurations(totalWork, totalActive, totalIdle);
+    totalWork = clamped.totalWork;
+    totalActive = clamped.totalActive;
+    totalIdle = clamped.totalIdle;
     
     // Calculate tracked time (when app was running and sending heartbeats)
     const trackedTime = totalActive + totalIdle;
@@ -455,24 +478,23 @@ class AttendanceService {
       const totalElapsed = Math.floor((effectiveEndTime - new Date(record.check_in_time)) / 1000);
       const totalWork = totalElapsed - totalBreak;
 
-      // Safeguard: Idle time should never exceed total work time
-      // If it does, cap idle time
-      if (totalIdle > totalWork && totalWork > 0) {
-        logger.warn(`Idle time (${totalIdle}s) exceeds total work time (${totalWork}s) for record ${record.id}, capping idle time`);
-        totalIdle = totalWork;
-      }
+      // Enforce invariants: active+idle must not exceed totalWork
+      const clamped = clampDurations(totalWork, totalActive, totalIdle);
+      const finalWork = clamped.totalWork;
+      const finalActive = clamped.totalActive;
+      const finalIdle = clamped.totalIdle;
 
       // Calculate tracked time (when app was running)
-      const trackedTime = totalActive + totalIdle;
+      const trackedTime = finalActive + finalIdle;
       // Untracked time is when the app was closed
-      const untrackedTime = Math.max(0, totalWork - trackedTime);
+      const untrackedTime = Math.max(0, finalWork - trackedTime);
 
       // Return record with calculated real-time durations
       return {
         ...record,
-        total_work_duration: totalWork > 0 ? totalWork : 0,
-        total_active_duration: totalActive,
-        total_idle_duration: totalIdle,
+        total_work_duration: finalWork > 0 ? finalWork : 0,
+        total_active_duration: finalActive,
+        total_idle_duration: finalIdle,
         total_break_duration: totalBreak,
         tracked_time: trackedTime,
         untracked_time: untrackedTime

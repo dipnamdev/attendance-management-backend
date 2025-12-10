@@ -3,6 +3,22 @@ const logger = require('../utils/logger');
 
 const MAX_BREAK_DURATION = 2 * 60 * 60; // 2 hours in seconds
 
+function clampDurations(totalWork, totalActive, totalIdle) {
+  const work = Math.max(0, totalWork || 0);
+  let active = Math.max(0, totalActive || 0);
+  let idle = Math.max(0, totalIdle || 0);
+  if (work === 0) return { totalWork: 0, totalActive: 0, totalIdle: 0 };
+  const sum = active + idle;
+  if (sum > work) {
+    const excess = sum - work;
+    const newIdle = Math.max(0, idle - excess);
+    const remainingExcess = Math.max(0, excess - (idle - newIdle));
+    const newActive = Math.max(0, active - remainingExcess);
+    return { totalWork: work, totalActive: newActive, totalIdle: newIdle };
+  }
+  return { totalWork: work, totalActive: active, totalIdle: idle };
+}
+
 async function autoCloseExcessiveBreaks() {
     const client = await pool.connect();
 
@@ -72,6 +88,7 @@ async function autoCloseExcessiveBreaks() {
                 // Calculate total work: from check-in to break end time (2 hours after break start), minus breaks
                 const totalElapsed = Math.floor((breakEndTime - new Date(brk.check_in_time)) / 1000);
                 const totalWork = totalElapsed - totalBreak;
+                const clamped = clampDurations(totalWork, totalActive, totalIdle);
 
                 // Auto check-out the employee at the break end time
                 await client.query(`
@@ -83,7 +100,7 @@ async function autoCloseExcessiveBreaks() {
               total_break_duration = $5,
               updated_at = NOW()
           WHERE id = $6
-        `, [breakEndTime, totalWork, totalActive, totalIdle, totalBreak, brk.attendance_record_id]);
+        `, [breakEndTime, clamped.totalWork, clamped.totalActive, clamped.totalIdle, totalBreak, brk.attendance_record_id]);
 
                 await client.query('COMMIT');
 

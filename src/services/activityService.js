@@ -8,13 +8,12 @@ const IDLE_THRESHOLD = 300;
 class ActivityService {
   async processHeartbeat(userId, activityData) {
     const {
-      is_active,
       active_window,
       active_application,
       url,
       mouse_clicks = 0,
       keyboard_strokes = 0,
-      idle_time_seconds = 0
+      idle_time_seconds = 0 // unused for state; kept for compatibility
     } = activityData;
 
     const client = await pool.connect();
@@ -44,124 +43,118 @@ class ActivityService {
          (user_id, attendance_record_id, timestamp, active_window_title, active_application, url, 
           mouse_clicks, keyboard_strokes, is_active, idle_time_seconds) 
          VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7, $8, $9)`,
-        [userId, attendance.id, active_window, active_application, url, mouse_clicks, keyboard_strokes, is_active, is_active ? 0 : 30]
+        [userId, attendance.id, active_window, active_application, url, mouse_clicks, keyboard_strokes, true, 0]
       );
 
       const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
       const now = Date.now();
 
-      // Get current activity log to check if we need to handle state transitions
+      // Track the last time we observed input activity
+      let lastInputTs = now;
+      let lastState = 'active';
+      let lastHeartbeatTs = now;
+
+      if (cachedActivity) {
+        const parsed = JSON.parse(cachedActivity);
+        lastInputTs = parsed.lastInputTs || now;
+        lastState = parsed.state || 'active';
+        lastHeartbeatTs = parsed.lastHeartbeatTs || now;
+      }
+
+      const hasInput = (mouse_clicks + keyboard_strokes) > 0;
+      if (hasInput) {
+        lastInputTs = now;
+      }
+
+      const secondsSinceInput = (now - lastInputTs) / 1000;
+      const secondsSinceHeartbeat = (now - lastHeartbeatTs) / 1000;
+      const currentShouldBeActive = hasInput || secondsSinceInput < IDLE_THRESHOLD;
+
+      // Get current open activity if any
       const currentActivityResult = await client.query(
         `SELECT * FROM activity_logs 
          WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL 
          ORDER BY start_time DESC LIMIT 1`,
         [userId, attendance.id]
       );
-
       const currentActivity = currentActivityResult.rows[0];
 
-      if (cachedActivity) {
-        const lastActivity = JSON.parse(cachedActivity);
-        const timeSinceLastActivity = (now - lastActivity.timestamp) / 1000;
-        const backdateSeconds = Math.min(IDLE_THRESHOLD, idle_time_seconds || IDLE_THRESHOLD);
+      // Transition Active -> Idle when 5+ minutes with no input
+      if (lastState === 'active' && !currentShouldBeActive && secondsSinceInput >= IDLE_THRESHOLD) {
+        const backdateSeconds = Math.min(IDLE_THRESHOLD, secondsSinceInput);
         const backdateInterval = `INTERVAL '${backdateSeconds} seconds'`;
 
-        // Case 1: Transition from Active to Idle
-        // This happens when:
-        // a) User was active and now is idle (based on is_active flag), OR
-        // b) There's a gap of 5+ minutes between heartbeats (app was closed/offline)
-        if (lastActivity.is_active && !is_active) {
-          // User transitioned from active to idle based on is_active flag
-          // Close the current active log if it exists
-          if (currentActivity && currentActivity.activity_type === 'active') {
-            await client.query(
-              `UPDATE activity_logs 
-               SET end_time = NOW() - ${backdateInterval}, duration = EXTRACT(EPOCH FROM (NOW() - ${backdateInterval} - start_time))::INTEGER
-               WHERE id = $1`,
-              [currentActivity.id]
-            );
-          }
-
-          // Start a new idle log
-          await client.query(
-            `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-             VALUES ($1, $2, 'idle', NOW() - ${backdateInterval})`,
-            [userId, attendance.id]
-          );
-
-        } else if (timeSinceLastActivity >= IDLE_THRESHOLD && lastActivity.is_active) {
-          // Case 1b: Gap of 5+ minutes between heartbeats (app was closed/offline)
-          // Backdate end time by threshold
-          const endTimeExpression = `NOW() - ${backdateInterval}`;
-          const durationExpression = `EXTRACT(EPOCH FROM (NOW() - ${backdateInterval} - start_time))::INTEGER`;
-
+        if (currentActivity && currentActivity.activity_type === 'active') {
           await client.query(
             `UPDATE activity_logs 
-             SET end_time = ${endTimeExpression}, 
-                 duration = ${durationExpression}
-             WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL AND activity_type = 'active'`,
-            [userId, attendance.id]
-          );
-
-          // Start the Idle log (backdated to 5 minutes ago)
-          const startTimeExpression = `NOW() - ${backdateInterval}`;
-
-          await client.query(
-            `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-             VALUES ($1, $2, 'idle', ${startTimeExpression})`,
-            [userId, attendance.id]
-          );
-
-        } else if (!lastActivity.is_active && is_active) {
-          // Case 2: Transition from Idle to Active
-          // Close the current idle log if it exists
-          if (currentActivity && currentActivity.activity_type === 'idle') {
-            await client.query(
-              `UPDATE activity_logs 
-               SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
-               WHERE id = $1`,
-              [currentActivity.id]
-            );
-          }
-
-          // Start a new active log
-          await client.query(
-            `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-             VALUES ($1, $2, 'active', NOW())`,
-            [userId, attendance.id]
+             SET end_time = NOW() - ${backdateInterval}, duration = EXTRACT(EPOCH FROM (NOW() - ${backdateInterval} - start_time))::INTEGER
+             WHERE id = $1`,
+            [currentActivity.id]
           );
         }
-        // Case 3: Continuing in same state (active->active or idle->idle)
-        // No action needed - existing log remains open
-      } else {
-        // First heartbeat - create initial activity log based on is_active flag
-        if (!currentActivity) {
-          const backdateSeconds = Math.min(IDLE_THRESHOLD, idle_time_seconds || IDLE_THRESHOLD);
-          const startTimeExpression = is_active
-            ? 'NOW()'
-            : `NOW() - INTERVAL '${backdateSeconds} seconds'`;
 
-          // Close any existing open active log if we're starting in idle
-          if (!is_active) {
-            await client.query(
-              `UPDATE activity_logs 
-               SET end_time = ${startTimeExpression}, duration = EXTRACT(EPOCH FROM (${startTimeExpression} - start_time))::INTEGER
-               WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL AND activity_type = 'active'`,
-              [userId, attendance.id]
-            );
-          }
+        await client.query(
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+           VALUES ($1, $2, 'idle', NOW() - ${backdateInterval})`,
+          [userId, attendance.id]
+        );
 
+        lastState = 'idle';
+      }
+      // Transition Idle -> Active when input resumes
+      else if (lastState === 'idle' && currentShouldBeActive) {
+        if (currentActivity && currentActivity.activity_type === 'idle') {
           await client.query(
-            `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-             VALUES ($1, $2, $3, ${startTimeExpression})`,
-            [userId, attendance.id, is_active ? 'active' : 'idle']
+            `UPDATE activity_logs 
+             SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
+             WHERE id = $1`,
+            [currentActivity.id]
           );
         }
+
+        await client.query(
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+           VALUES ($1, $2, 'active', NOW())`,
+          [userId, attendance.id]
+        );
+
+        lastState = 'active';
+      }
+      // Gap case: if heartbeats stopped for 5+ minutes and last state active, backdate to cover gap
+      else if (secondsSinceHeartbeat >= IDLE_THRESHOLD && lastState === 'active') {
+        const backdateSeconds = Math.min(IDLE_THRESHOLD, secondsSinceHeartbeat);
+        const backdateInterval = `INTERVAL '${backdateSeconds} seconds'`;
+
+        if (currentActivity && currentActivity.activity_type === 'active') {
+          await client.query(
+            `UPDATE activity_logs 
+             SET end_time = NOW() - ${backdateInterval}, duration = EXTRACT(EPOCH FROM (NOW() - ${backdateInterval} - start_time))::INTEGER
+             WHERE id = $1`,
+            [currentActivity.id]
+          );
+        }
+
+        await client.query(
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+           VALUES ($1, $2, 'idle', NOW() - ${backdateInterval})`,
+          [userId, attendance.id]
+        );
+
+        lastState = 'idle';
+      }
+      // First heartbeat or no state yet
+      else if (!cachedActivity && !currentActivity) {
+        await client.query(
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+           VALUES ($1, $2, 'active', NOW())`,
+          [userId, attendance.id]
+        );
+        lastState = 'active';
       }
 
       await redisClient.set(
         `user:${userId}:last_activity`,
-        JSON.stringify({ is_active, timestamp: now }),
+        JSON.stringify({ state: lastState, lastInputTs, lastHeartbeatTs: now }),
         { EX: 600 }
       );
 
