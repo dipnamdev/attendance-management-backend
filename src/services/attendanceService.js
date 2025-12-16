@@ -277,12 +277,21 @@ class AttendanceService {
       let duration = log.duration || 0;
       if (!log.end_time && log.start_time) {
         duration = Math.floor((now - new Date(log.start_time)) / 1000);
+
         // Cap ongoing idle logs to prevent excessive accumulation
         // If idle log is ongoing for more than 24 hours, cap it
         const MAX_IDLE_DURATION = 24 * 60 * 60; // 24 hours in seconds
         if (log.activity_type === 'idle' && duration > MAX_IDLE_DURATION) {
           logger.warn(`Ongoing idle log duration (${duration}s) exceeds maximum (${MAX_IDLE_DURATION}s), capping it for attendance ${attendance.id}`);
           duration = MAX_IDLE_DURATION;
+        }
+
+        // Fix for "Ghost Active Time": Cap open active logs at 5 minutes (IDLE_THRESHOLD)
+        // If app crashed/disconnected, we shouldn't continue counting active time indefinitely.
+        // 5 minutes matches the heartbeat gap threshold.
+        const MAX_ACTIVE_OPEN_DURATION = 300;
+        if (log.activity_type === 'active' && duration > MAX_ACTIVE_OPEN_DURATION) {
+          duration = MAX_ACTIVE_OPEN_DURATION;
         }
       }
 
@@ -333,7 +342,7 @@ class AttendanceService {
     totalWork = clamped.totalWork;
     totalActive = clamped.totalActive;
     totalIdle = clamped.totalIdle;
-    
+
     // Calculate tracked time (when app was running and sending heartbeats)
     const trackedTime = totalActive + totalIdle;
     // Untracked time is when the app was closed (no heartbeats sent)
