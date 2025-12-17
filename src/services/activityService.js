@@ -79,24 +79,55 @@ class ActivityService {
       );
       const currentActivity = currentActivityResult.rows[0];
 
+      // Stale Session Handling (Redis expired but DB log remains open)
+      // If we have no cached state, but find an open active log that is older than threshold, close it.
+      if (!cachedActivity && currentActivity && currentActivity.activity_type === 'active') {
+        const startTime = new Date(currentActivity.start_time).getTime();
+        const duration = (now - startTime) / 1000;
+
+        if (duration > IDLE_THRESHOLD) {
+          // This is a ghost session (user away > 10m). Close it safely.
+          const safeEndTime = new Date(startTime + IDLE_THRESHOLD * 1000);
+
+          await client.query(
+            `UPDATE activity_logs 
+                   SET end_time = $1, duration = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
+                   WHERE id = $2`,
+            [safeEndTime, currentActivity.id]
+          );
+
+          // We don't necessarily insert an idle log for the huge gap here, 
+          // because we are about to process the *current* heartbeat which is active.
+          // Just ensuring the old one is closed prevents the "inflation".
+
+          // Reset state so we treat this as a fresh start
+          lastState = 'idle';
+          currentActivity = null; // Force new log creation below
+        }
+      }
+
       // Transition Active -> Idle when 5+ minutes with no input
       if (lastState === 'active' && !currentShouldBeActive && secondsSinceInput >= IDLE_THRESHOLD) {
-        const backdateSeconds = Math.min(IDLE_THRESHOLD, secondsSinceInput);
-        const backdateInterval = `INTERVAL '${backdateSeconds} seconds'`;
+        // Fix: Close at Last Input + Threshold, not back from NOW
+        // Actually, if we are transitioning TO Idle, we consider them active up until the threshold triggered?
+        // Or strictly up to last input? standard is "Active until timeout".
+        // Let's stick to the safe logic: Close at LastInput + Threshold.
+
+        const closeTime = new Date(lastInputTs + IDLE_THRESHOLD * 1000);
 
         if (currentActivity && currentActivity.activity_type === 'active') {
           await client.query(
             `UPDATE activity_logs 
-             SET end_time = NOW() - ${backdateInterval}, duration = EXTRACT(EPOCH FROM (NOW() - ${backdateInterval} - start_time))::INTEGER
-             WHERE id = $1`,
-            [currentActivity.id]
+             SET end_time = $1, duration = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
+             WHERE id = $2`,
+            [closeTime, currentActivity.id]
           );
         }
 
         await client.query(
           `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-           VALUES ($1, $2, 'idle', NOW() - ${backdateInterval})`,
-          [userId, attendance.id]
+           VALUES ($1, $2, 'idle', $3)`,
+          [userId, attendance.id, closeTime]
         );
 
         lastState = 'idle';
@@ -120,24 +151,28 @@ class ActivityService {
 
         lastState = 'active';
       }
-      // Gap case: if heartbeats stopped for 5+ minutes and last state active, backdate to cover gap
+      // Gap case: if heartbeats stopped for 5+ minutes and last state active
       else if (secondsSinceHeartbeat >= IDLE_THRESHOLD && lastState === 'active') {
-        const backdateSeconds = Math.min(IDLE_THRESHOLD, secondsSinceHeartbeat);
-        const backdateInterval = `INTERVAL '${backdateSeconds} seconds'`;
+        // Fix: Calculate from Last Heartbeat, NOT from NOW.
+        // Previous buggy logic: NOW - 5m. (Absorbed gap as active).
+        // New logic: LastHeartbeat + 5m. (Marks gap as Idle).
+
+        const closeTime = new Date(lastHeartbeatTs + IDLE_THRESHOLD * 1000);
 
         if (currentActivity && currentActivity.activity_type === 'active') {
           await client.query(
             `UPDATE activity_logs 
-             SET end_time = NOW() - ${backdateInterval}, duration = EXTRACT(EPOCH FROM (NOW() - ${backdateInterval} - start_time))::INTEGER
-             WHERE id = $1`,
-            [currentActivity.id]
+             SET end_time = $1, duration = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
+             WHERE id = $2`,
+            [closeTime, currentActivity.id]
           );
         }
 
+        // Insert Idle log covering the gap (CloseTime -> NOW)
         await client.query(
           `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-           VALUES ($1, $2, 'idle', NOW() - ${backdateInterval})`,
-          [userId, attendance.id]
+           VALUES ($1, $2, 'idle', $3)`,
+          [userId, attendance.id, closeTime]
         );
 
         lastState = 'idle';
