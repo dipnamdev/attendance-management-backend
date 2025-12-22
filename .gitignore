@@ -9,3 +9,5 @@ uploads/
 dist/
 build/
 coverage/
+.zip
+AMS_BACKEND.zip

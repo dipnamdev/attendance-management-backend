@@ -2,54 +2,54 @@ const pool = require('../config/database');
 const logger = require('../utils/logger');
 
 function clampDurations(totalWork, totalActive, totalIdle) {
-        const work = Math.max(0, totalWork || 0);
-        let active = Math.max(0, totalActive || 0);
-        let idle = Math.max(0, totalIdle || 0);
-        if (work === 0) return { totalWork: 0, totalActive: 0, totalIdle: 0 };
-        const sum = active + idle;
-        if (sum > work) {
-                const excess = sum - work;
-                const newIdle = Math.max(0, idle - excess); // trim idle first
-                const remainingExcess = Math.max(0, excess - (idle - newIdle));
-                const newActive = Math.max(0, active - remainingExcess);
-                return { totalWork: work, totalActive: newActive, totalIdle: newIdle };
-        }
-        return { totalWork: work, totalActive: active, totalIdle: idle };
+    const work = Math.max(0, totalWork || 0);
+    let active = Math.max(0, totalActive || 0);
+    let idle = Math.max(0, totalIdle || 0);
+    if (work === 0) return { totalWork: 0, totalActive: 0, totalIdle: 0 };
+    const sum = active + idle;
+    if (sum > work) {
+        const excess = sum - work;
+        const newIdle = Math.max(0, idle - excess); // trim idle first
+        const remainingExcess = Math.max(0, excess - (idle - newIdle));
+        const newActive = Math.max(0, active - remainingExcess);
+        return { totalWork: work, totalActive: newActive, totalIdle: newIdle };
+    }
+    return { totalWork: work, totalActive: active, totalIdle: idle };
 }
 
 async function autoCheckOutUsers(targetDate) {
-        const client = await pool.connect();
+    const client = await pool.connect();
 
-        try {
-                const targetDesc = targetDate ? String(targetDate) : 'today';
-                logger.info(`Running auto-checkout job for end of day (${targetDesc})...`);
+    try {
+        const targetDesc = targetDate ? String(targetDate) : 'today';
+        logger.info(`Running auto-checkout job for end of day (${targetDesc})...`);
 
-                // Compute endOfDay for targetDate if provided, else use current date's end
-                const now = new Date();
-                let endOfDay = new Date(now);
-                if (targetDate) {
-                    const t = new Date(targetDate);
-                    endOfDay = new Date(t);
-                }
-                endOfDay.setHours(23, 59, 59, 999);
+        // Compute endOfDay for targetDate if provided, else use current date's end
+        const now = new Date();
+        let endOfDay = new Date(now);
+        if (targetDate) {
+            const t = new Date(targetDate);
+            endOfDay = new Date(t);
+        }
+        endOfDay.setHours(23, 59, 59, 999);
 
-                // Find all users who are still checked in for the target date
-                let openRecords;
-                if (targetDate) {
-                    openRecords = await client.query(`
+        // Find all users who are still checked in for the target date
+        let openRecords;
+        if (targetDate) {
+            openRecords = await client.query(`
                         SELECT id, user_id, check_in_time, date
                         FROM attendance_records
                         WHERE date::date = $1::date
                             AND check_out_time IS NULL
                     `, [targetDate]);
-                } else {
-                    openRecords = await client.query(`
+        } else {
+            openRecords = await client.query(`
                         SELECT id, user_id, check_in_time, date
                         FROM attendance_records
                         WHERE date = CURRENT_DATE
                             AND check_out_time IS NULL
                     `);
-                }
+        }
 
         if (openRecords.rows.length === 0) {
             logger.info('No open attendance records found to auto-checkout.');
@@ -60,54 +60,51 @@ async function autoCheckOutUsers(targetDate) {
 
         let checkedOutCount = 0;
 
-                for (const record of openRecords.rows) {
-                        await client.query('BEGIN');
+        for (const record of openRecords.rows) {
+            await client.query('BEGIN');
 
-                        try {
-                                const recordEndOfDay = endOfDay; // for targetDate all records share same endOfDay; for backfill caller will call per-record
+            try {
+                const recordEndOfDay = endOfDay;
 
-                                // 1. Close any open activity logs
-                                await client.query(`
+                // Fetch current attendance record with state info
+                const attendanceResult = await client.query(
+                    'SELECT * FROM attendance_records WHERE id = $1',
+                    [record.id]
+                );
+                let attendance = attendanceResult.rows[0];
+
+                // Finalize current state at end of day
+                const stateTransitionService = require('../services/stateTransitionService');
+                attendance = await stateTransitionService.finalizeState(
+                    attendance,
+                    recordEndOfDay,
+                    client
+                );
+
+                // 1. Close any open activity logs for audit trail
+                await client.query(`
                     UPDATE activity_logs 
                     SET end_time = $1, 
                             duration = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
                     WHERE attendance_record_id = $2 AND end_time IS NULL
                 `, [recordEndOfDay, record.id]);
 
-                                // 2. Close any open lunch breaks
-                                await client.query(`
+                // 2. Close any open lunch breaks
+                await client.query(`
                     UPDATE lunch_breaks 
                     SET break_end_time = $1, 
                             duration = EXTRACT(EPOCH FROM ($1 - break_start_time))::INTEGER
                     WHERE attendance_record_id = $2 AND break_end_time IS NULL
                 `, [recordEndOfDay, record.id]);
 
-                                // 3. Calculate final durations
-                                const activityStats = await client.query(`
-                    SELECT 
-                        COALESCE(SUM(CASE WHEN activity_type = 'active' THEN duration ELSE 0 END), 0) as total_active,
-                        COALESCE(SUM(CASE WHEN activity_type = 'idle' THEN duration ELSE 0 END), 0) as total_idle
-                    FROM activity_logs 
-                    WHERE attendance_record_id = $1
-                `, [record.id]);
+                // 3. Calculate totals from state-based counters
+                const totalActive = attendance.active_seconds || 0;
+                const totalIdle = attendance.idle_seconds || 0;
+                const totalBreak = attendance.lunch_seconds || 0;
+                const totalWork = totalActive + totalIdle;
 
-                                const breakStats = await client.query(`
-                    SELECT COALESCE(SUM(duration), 0) as total_break 
-                    FROM lunch_breaks 
-                    WHERE attendance_record_id = $1
-                `, [record.id]);
-
-                                const totalActive = parseInt(activityStats.rows[0].total_active) || 0;
-                                const totalIdle = parseInt(activityStats.rows[0].total_idle) || 0;
-                                const totalBreak = parseInt(breakStats.rows[0].total_break) || 0;
-
-                                // Calculate total work: from check-in to end of day, minus breaks
-                                const totalElapsed = Math.floor((recordEndOfDay - new Date(record.check_in_time)) / 1000);
-                                const totalWork = totalElapsed - totalBreak;
-                                const clamped = clampDurations(totalWork, totalActive, totalIdle);
-
-                                // 4. Update attendance record
-                                await client.query(`
+                // 4. Update attendance record with final totals
+                await client.query(`
                     UPDATE attendance_records
                     SET check_out_time = $1,
                             total_work_duration = $2,
@@ -116,18 +113,18 @@ async function autoCheckOutUsers(targetDate) {
                             total_break_duration = $5,
                             updated_at = NOW()
                     WHERE id = $6
-                `, [recordEndOfDay, clamped.totalWork, clamped.totalActive, clamped.totalIdle, totalBreak, record.id]);
+                `, [recordEndOfDay, totalWork, totalActive, totalIdle, totalBreak, record.id]);
 
-                                await client.query('COMMIT');
-                                const userIdDisplay = record.user_id ? String(record.user_id).substring(0, 8) : 'unknown';
-                                logger.info(`Auto-checked out user ${userIdDisplay} for date ${record.date} at ${recordEndOfDay.toISOString()}`);
-                                checkedOutCount++;
+                await client.query('COMMIT');
+                const userIdDisplay = record.user_id ? String(record.user_id).substring(0, 8) : 'unknown';
+                logger.info(`Auto-checked out user ${userIdDisplay} for date ${record.date} at ${recordEndOfDay.toISOString()} (state-based: work=${totalWork}s, active=${totalActive}s, idle=${totalIdle}s, lunch=${totalBreak}s)`);
+                checkedOutCount++;
 
-                        } catch (error) {
-                                await client.query('ROLLBACK');
-                                logger.error(`Failed to auto-checkout record ${record.id}:`, error);
-                        }
-                }
+            } catch (error) {
+                await client.query('ROLLBACK');
+                logger.error(`Failed to auto-checkout record ${record.id}:`, error);
+            }
+        }
 
         logger.info(`Auto-checkout job completed. Checked out ${checkedOutCount} users.`);
         return { checkedOut: checkedOutCount };

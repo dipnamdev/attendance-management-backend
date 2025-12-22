@@ -7,14 +7,14 @@ const heartbeat = async (req, res, next) => {
     const userId = req.user.id;
     const activityData = req.body;
 
-    console.log('Heartbeat payload from client:', activityData); 
+    console.log('Heartbeat payload from client:', activityData);
     const result = await activityService.processHeartbeat(userId, activityData);
 
     if (result.error) {
       return errorResponse(res, result.error, result.message, 400);
     }
 
-    return successResponse(res, null, 'Heartbeat recorded');
+    return successResponse(res, result, 'Heartbeat recorded');
   } catch (error) {
     logger.error('Heartbeat controller error:', error);
     next(error);

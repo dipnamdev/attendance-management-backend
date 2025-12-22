@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS attendance_records (
     total_active_duration INTEGER DEFAULT 0,
     total_idle_duration INTEGER DEFAULT 0,
     total_break_duration INTEGER DEFAULT 0,
+    current_state VARCHAR(20) CHECK (current_state IN ('WORKING', 'IDLE', 'LUNCH')),
+    last_state_change_at TIMESTAMP,
+    active_seconds INTEGER DEFAULT 0,
+    idle_seconds INTEGER DEFAULT 0,
+    lunch_seconds INTEGER DEFAULT 0,
     status VARCHAR(20) DEFAULT 'present' CHECK (status IN ('present', 'absent', 'half_day', 'on_leave')),
     check_in_ip VARCHAR(45),
     check_out_ip VARCHAR(45),
@@ -145,6 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 CREATE INDEX IF NOT EXISTS idx_attendance_user_id ON attendance_records(user_id);
 CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance_records(date);
 CREATE INDEX IF NOT EXISTS idx_attendance_user_date ON attendance_records(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_attendance_current_state ON attendance_records(current_state);
 
 CREATE INDEX IF NOT EXISTS idx_activity_logs_user_id ON activity_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_activity_logs_attendance_id ON activity_logs(attendance_record_id);

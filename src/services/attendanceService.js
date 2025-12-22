@@ -2,6 +2,7 @@ const pool = require('../config/database');
 const { redisClient } = require('../config/redis');
 const { calculateDuration, formatDate } = require('../utils/helpers');
 const logger = require('../utils/logger');
+const stateTransitionService = require('./stateTransitionService');
 
 // Helper to enforce invariants and prevent runaway sums
 function clampDurations(totalWork, totalActive, totalIdle) {
@@ -68,6 +69,11 @@ class AttendanceService {
                  total_active_duration = NULL,
                  total_idle_duration = NULL,
                  total_break_duration = NULL,
+                 active_seconds = 0,
+                 idle_seconds = 0,
+                 lunch_seconds = 0,
+                 current_state = NULL,
+                 last_state_change_at = NULL,
                  updated_at = NOW()
              WHERE id = $1
              RETURNING *`,
@@ -100,19 +106,30 @@ class AttendanceService {
         attendance = attendanceResult.rows[0];
       }
 
+      // Initialize state as WORKING
+      attendance = await stateTransitionService.applyStateTransition(
+        attendance,
+        'WORKING',
+        new Date(),
+        client
+      );
+
+      // Keep activity_logs for audit trail
       await client.query(
         `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
          VALUES ($1, $2, 'active', NOW())`,
         [userId, attendance.id]
       );
 
+      // Store current state in Redis
       await redisClient.set(`user:${userId}:attendance`, JSON.stringify(attendance), {
         EX: 86400,
       });
+      await redisClient.set(`user:${userId}:current_state`, 'WORKING', { EX: 86400 });
 
       await client.query('COMMIT');
 
-      logger.info(`User ${userId} checked in at ${attendance.check_in_time}`);
+      logger.info(`User ${userId} checked in at ${attendance.check_in_time} with state WORKING`);
       return { attendance };
     } catch (error) {
       await client.query('ROLLBACK');
@@ -140,14 +157,17 @@ class AttendanceService {
         return { error: 'NOT_CHECKED_IN', message: 'You have not checked in today' };
       }
 
-      const attendance = attendanceResult.rows[0];
+      let attendance = attendanceResult.rows[0];
 
       if (attendance.check_out_time) {
         await client.query('ROLLBACK');
         return { error: 'ALREADY_CHECKED_OUT', message: 'You have already checked out today' };
       }
 
-      // Close all open activity logs and calculate their durations
+      // Finalize current state and accumulate time
+      attendance = await stateTransitionService.finalizeState(attendance, new Date(), client);
+
+      // Close all open activity logs for audit trail
       const closedActivities = await client.query(
         `UPDATE activity_logs 
          SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
@@ -157,11 +177,8 @@ class AttendanceService {
       );
 
       logger.info(`Closed ${closedActivities.rows.length} open activities for user ${userId}`);
-      if (closedActivities.rows.length > 0) {
-        logger.debug('Closed activities:', closedActivities.rows);
-      }
 
-      // Close all open lunch breaks and calculate their durations
+      // Close all open lunch breaks
       const closedBreaks = await client.query(
         `UPDATE lunch_breaks 
          SET break_end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - break_start_time))::INTEGER
@@ -171,39 +188,20 @@ class AttendanceService {
       );
 
       logger.info(`Closed ${closedBreaks.rows.length} open lunch breaks for user ${userId}`);
-      if (closedBreaks.rows.length > 0) {
-        logger.debug('Closed breaks:', closedBreaks.rows);
-      }
 
-      // Now sum up all the durations (all activities should now have durations calculated)
-      const activityStats = await client.query(
-        `SELECT 
-           COALESCE(SUM(CASE WHEN activity_type = 'active' THEN duration ELSE 0 END), 0) as total_active,
-           COALESCE(SUM(CASE WHEN activity_type = 'idle' THEN duration ELSE 0 END), 0) as total_idle
-         FROM activity_logs 
-         WHERE attendance_record_id = $1`,
-        [attendance.id]
+      // Calculate totals from state-based counters
+      const totalActive = attendance.active_seconds || 0;
+      const totalIdle = attendance.idle_seconds || 0;
+      const totalBreak = attendance.lunch_seconds || 0;
+
+      // Calculate total work time: active + idle (excludes lunch)
+      const totalWork = totalActive + totalIdle;
+
+      logger.info(
+        `State-based duration for user ${userId}: work=${totalWork}s, active=${totalActive}s, idle=${totalIdle}s, lunch=${totalBreak}s`
       );
 
-      const breakStats = await client.query(
-        `SELECT COALESCE(SUM(duration), 0) as total_break 
-         FROM lunch_breaks 
-         WHERE attendance_record_id = $1`,
-        [attendance.id]
-      );
-
-      const totalActive = parseInt(activityStats.rows[0].total_active) || 0;
-      const totalIdle = parseInt(activityStats.rows[0].total_idle) || 0;
-      const totalBreak = parseInt(breakStats.rows[0].total_break) || 0;
-
-      // Calculate total work time: (check-in to check-out) minus breaks
-      const totalElapsed = calculateDuration(attendance.check_in_time, new Date());
-      const totalWork = totalElapsed - totalBreak;
-
-      const clamped = clampDurations(totalWork, totalActive, totalIdle);
-
-      logger.info(`Duration calculations for user ${userId}: elapsed=${totalElapsed}s, work=${totalWork}s, active=${totalActive}s, idle=${totalIdle}s, break=${totalBreak}s`);
-
+      // Update legacy fields for backward compatibility
       const updatedAttendance = await client.query(
         `UPDATE attendance_records 
          SET check_out_time = NOW(), 
@@ -216,11 +214,13 @@ class AttendanceService {
              updated_at = NOW()
          WHERE id = $7 
          RETURNING *`,
-        [ipAddress, location ? JSON.stringify(location) : null, clamped.totalWork, clamped.totalActive, clamped.totalIdle, totalBreak, attendance.id]
+        [ipAddress, location ? JSON.stringify(location) : null, totalWork, totalActive, totalIdle, totalBreak, attendance.id]
       );
 
       await redisClient.del(`user:${userId}:attendance`);
       await redisClient.del(`user:${userId}:current_activity`);
+      await redisClient.del(`user:${userId}:current_state`);
+      await redisClient.del(`user:${userId}:last_activity`);
 
       await client.query('COMMIT');
 
@@ -245,108 +245,47 @@ class AttendanceService {
     const attendance = result.rows[0];
     if (!attendance) return null;
 
-    // Calculate real-time stats
-    const activityStats = await pool.query(
-      `SELECT 
-         activity_type,
-         start_time,
-         end_time,
-         duration
-       FROM activity_logs 
-       WHERE attendance_record_id = $1`,
-      [attendance.id]
-    );
-
-    const breakStats = await pool.query(
-      `SELECT 
-         break_start_time as start_time,
-         break_end_time as end_time,
-         duration
-       FROM lunch_breaks 
-       WHERE attendance_record_id = $1`,
-      [attendance.id]
-    );
-
-    let totalActive = 0;
-    let totalIdle = 0;
-    let totalBreak = 0;
-    const now = new Date();
-
-    // Calculate active/idle time
-    activityStats.rows.forEach(log => {
-      let duration = log.duration || 0;
-      if (!log.end_time && log.start_time) {
-        duration = Math.floor((now - new Date(log.start_time)) / 1000);
-
-        // Cap ongoing idle logs to prevent excessive accumulation
-        // If idle log is ongoing for more than 24 hours, cap it
-        const MAX_IDLE_DURATION = 24 * 60 * 60; // 24 hours in seconds
-        if (log.activity_type === 'idle' && duration > MAX_IDLE_DURATION) {
-          logger.warn(`Ongoing idle log duration (${duration}s) exceeds maximum (${MAX_IDLE_DURATION}s), capping it for attendance ${attendance.id}`);
-          duration = MAX_IDLE_DURATION;
-        }
-
-        // Fix for "Ghost Active Time": Cap open active logs at 5 minutes (IDLE_THRESHOLD)
-        // If app crashed/disconnected, we shouldn't continue counting active time indefinitely.
-        // 5 minutes matches the heartbeat gap threshold.
-        const MAX_ACTIVE_OPEN_DURATION = 300;
-        if (log.activity_type === 'active' && duration > MAX_ACTIVE_OPEN_DURATION) {
-          duration = MAX_ACTIVE_OPEN_DURATION;
-        }
-      }
-
-      if (log.activity_type === 'active') {
-        totalActive += duration;
-      } else if (log.activity_type === 'idle') {
-        totalIdle += duration;
-      }
-    });
-
-    // Calculate break time with safeguards
-    const MAX_BREAK_DURATION = 2 * 60 * 60; // 2 hours in seconds
-    breakStats.rows.forEach(brk => {
-      let duration = brk.duration || 0;
-      if (!brk.end_time && brk.start_time) {
-        const breakStart = new Date(brk.start_time);
-        const breakStartDate = new Date(breakStart.getFullYear(), breakStart.getMonth(), breakStart.getDate());
-        const nowDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-        // If break started on a different day, cap it at end of that day
-        if (breakStartDate.getTime() !== nowDate.getTime()) {
-          const endOfDay = new Date(breakStart);
-          endOfDay.setHours(23, 59, 59, 999);
-          duration = Math.floor((endOfDay - breakStart) / 1000);
-          logger.warn(`Break started on different day for attendance ${attendance.id}, capped at end of day: ${duration}s`);
-        } else {
-          // Calculate duration but cap at maximum
-          duration = Math.floor((now - breakStart) / 1000);
-          if (duration > MAX_BREAK_DURATION) {
-            logger.warn(`Ongoing break duration (${duration}s) exceeds maximum (${MAX_BREAK_DURATION}s), capping it`);
-            duration = MAX_BREAK_DURATION;
-          }
-        }
-      }
-      totalBreak += duration;
-    });
-
-    // Calculate total work time (Check-in to Now/Check-out minus Breaks)
-    let totalWork = 0;
-    if (attendance.check_in_time) {
-      const endTime = attendance.check_out_time ? new Date(attendance.check_out_time) : now;
-      const totalElapsed = Math.floor((endTime - new Date(attendance.check_in_time)) / 1000);
-      totalWork = totalElapsed - totalBreak;
+    // If already checked out, return stored values
+    if (attendance.check_out_time) {
+      return {
+        ...attendance,
+        total_time: attendance.total_work_duration || 0,
+        active_time: attendance.total_active_duration || 0,
+        idle_time: attendance.total_idle_duration || 0,
+        break_time: attendance.total_break_duration || 0,
+        tracked_time: (attendance.total_active_duration || 0) + (attendance.total_idle_duration || 0),
+        untracked_time: 0
+      };
     }
 
-    // Enforce invariants: active+idle must not exceed totalWork
-    const clamped = clampDurations(totalWork, totalActive, totalIdle);
-    totalWork = clamped.totalWork;
-    totalActive = clamped.totalActive;
-    totalIdle = clamped.totalIdle;
+    // For ongoing sessions, calculate real-time from state counters
+    const now = new Date();
 
-    // Calculate tracked time (when app was running and sending heartbeats)
+    // Get accumulated time from state counters
+    let totalActive = attendance.active_seconds || 0;
+    let totalIdle = attendance.idle_seconds || 0;
+    let totalBreak = attendance.lunch_seconds || 0;
+
+    // Add current state duration
+    if (attendance.current_state && attendance.last_state_change_at) {
+      const currentStateDuration = stateTransitionService.getCurrentStateDuration(attendance, now);
+
+      switch (currentStateDuration.state) {
+        case 'WORKING':
+          totalActive += currentStateDuration.duration;
+          break;
+        case 'IDLE':
+          totalIdle += currentStateDuration.duration;
+          break;
+        case 'LUNCH':
+          totalBreak += currentStateDuration.duration;
+          break;
+      }
+    }
+
+    // Calculate total work time: active + idle (excludes lunch)
+    const totalWork = totalActive + totalIdle;
     const trackedTime = totalActive + totalIdle;
-    // Untracked time is when the app was closed (no heartbeats sent)
-    const untrackedTime = Math.max(0, totalWork - trackedTime);
 
     return {
       ...attendance,
@@ -355,7 +294,8 @@ class AttendanceService {
       idle_time: totalIdle,
       break_time: totalBreak,
       tracked_time: trackedTime,
-      untracked_time: untrackedTime
+      untracked_time: 0,
+      current_state: attendance.current_state
     };
   }
 
