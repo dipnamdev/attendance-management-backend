@@ -5,6 +5,8 @@ const ensureDatabaseExists = require('./ensureDatabase');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+   options: "-c search_path=public"
+
 });
 
 const migration = `
