@@ -52,13 +52,28 @@ class AttendanceService {
 
         // If checked out, allow re-check-in by updating the record
         if (existing.check_out_time) {
-          // Close any open lunch breaks that might have been missed
+          // Close any open lunch breaks that might have been missed (safety net)
           await client.query(
             `UPDATE lunch_breaks 
              SET break_end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - break_start_time))::INTEGER
              WHERE user_id = $1 AND attendance_record_id = $2 AND break_end_time IS NULL`,
             [userId, existing.id]
           );
+
+          // Calculate gap between last check-out and now
+          const nowMs = new Date().getTime();
+          const checkOutMs = new Date(existing.check_out_time).getTime();
+          const gapSeconds = Math.max(0, Math.floor((nowMs - checkOutMs) / 1000));
+
+          // Log this gap as 'idle' in activity_logs to keep reports consistent
+          if (gapSeconds > 0) {
+            await client.query(
+              `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time, end_time, duration) 
+               VALUES ($1, $2, 'idle', $3, NOW(), $4)`,
+              [userId, existing.id, existing.check_out_time, gapSeconds]
+            );
+            logger.info(`Logged gap of ${gapSeconds}s as idle time for user ${userId} during re-check-in`);
+          }
 
           const updateResult = await client.query(
             `UPDATE attendance_records 
@@ -69,18 +84,17 @@ class AttendanceService {
                  total_active_duration = NULL,
                  total_idle_duration = NULL,
                  total_break_duration = NULL,
-                 active_seconds = 0,
-                 idle_seconds = 0,
-                 lunch_seconds = 0,
+                 -- Add gap to existing idle_seconds, PRESERVE other counters
+                 idle_seconds = COALESCE(idle_seconds, 0) + $2,
                  current_state = NULL,
                  last_state_change_at = NULL,
                  updated_at = NOW()
              WHERE id = $1
              RETURNING *`,
-            [existing.id]
+            [existing.id, gapSeconds]
           );
           attendance = updateResult.rows[0];
-          logger.info(`User ${userId} re-checked in after marking out`);
+          logger.info(`User ${userId} re-checked in. Gap of ${gapSeconds}s added to idle.`);
         }
         // If an attendance row exists but has no check_in_time (pre-created), update it to set check-in
         if (!existing.check_in_time && !existing.check_out_time) {
