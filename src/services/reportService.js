@@ -169,6 +169,7 @@ class ReportService {
          ar.total_idle_duration,
          ar.status,
          lb.break_start_time,
+         lb.break_end_time,
          lb.break_end_time as break_in_time
        FROM users u
        LEFT JOIN attendance_records ar ON u.id = ar.user_id AND ar.date::date = $1::date
@@ -176,7 +177,7 @@ class ReportService {
          SELECT break_start_time, break_end_time
          FROM lunch_breaks lb
          WHERE lb.attendance_record_id = ar.id
-         ORDER BY lb.created_at DESC
+         ORDER BY lb.break_start_time DESC
          LIMIT 1
        ) lb ON true
        WHERE u.status = 'active'
