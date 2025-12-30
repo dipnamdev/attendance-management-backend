@@ -3,6 +3,7 @@ const { redisClient } = require('../config/redis');
 const { formatDate } = require('../utils/helpers');
 const logger = require('../utils/logger');
 const stateTransitionService = require('./stateTransitionService');
+const attendanceService = require('./attendanceService');
 
 const IDLE_THRESHOLD = 300; // 5 minutes in seconds
 
@@ -61,9 +62,46 @@ class ActivityService {
         lastHeartbeatTs = parsed.lastHeartbeatTs || now;
       }
 
+      // Calculate gap since last input
+      const gapSeconds = (now - lastInputTs) / 1000;
+
+      // 1. Check for Auto-Checkout (Inactive > 60 minutes)
+      if (gapSeconds > 3600) {
+        logger.info(`User ${userId} inactive for ${gapSeconds}s (> 60m). Auto-checking out.`);
+        await client.query('ROLLBACK'); // Abort current transaction
+
+        // release client before calling external service to avoid deadlock/pool exhaustion
+        client.release();
+
+        // Perform checkout
+        const checkoutResult = await attendanceService.checkOut(userId, 'Auto-Checkout', { reason: 'Inactive > 60m' });
+
+        return {
+          success: false,
+          error: 'AUTO_CHECKED_OUT',
+          message: 'You were automatically checked out due to inactivity',
+          data: checkoutResult
+        };
+      }
+
+      // 2. Check for Idle Gap (Inactive > 5 minutes)
+      // If gap is significant, retroactively mark the gap period as IDLE
+      if (gapSeconds > IDLE_THRESHOLD && attendance.current_state === 'WORKING') {
+        logger.info(`Gap of ${gapSeconds}s detected for user ${userId}. Retroactively setting state to IDLE at ${new Date(lastInputTs).toISOString()}`);
+
+        attendance = await stateTransitionService.applyStateTransition(
+          attendance,
+          'IDLE',
+          new Date(lastInputTs), // Transition at start of gap
+          client
+        );
+      }
+
       const { is_active } = activityData;
-      // Trust the client's detection (includes mouse moves, clicks, keys)
-      const hasInput = is_active === true || is_active === 'true' || (mouse_clicks + keyboard_strokes) > 0;
+      // Trust the client's detection but EXCLUDE mouse moves as per requirement
+      // Only count actual keyboard strokes or mouse clicks as "Working" activity
+      // const hasInput = is_active === true || is_active === 'true' || (mouse_clicks + keyboard_strokes) > 0;
+      const hasInput = (mouse_clicks + keyboard_strokes) > 0;
       if (hasInput) {
         lastInputTs = now;
       }
