@@ -6,6 +6,7 @@ const stateTransitionService = require('./stateTransitionService');
 const attendanceService = require('./attendanceService');
 
 const IDLE_THRESHOLD = 300; // 5 minutes in seconds
+const AUTO_CHECKOUT_THRESHOLD = 3600; // 60 minutes in seconds
 
 class ActivityService {
   async processHeartbeat(userId, activityData) {
@@ -15,7 +16,6 @@ class ActivityService {
       url,
       mouse_clicks = 0,
       keyboard_strokes = 0,
-      idle_time_seconds = 0 // unused for state; kept for compatibility
     } = activityData;
 
     const client = await pool.connect();
@@ -40,7 +40,115 @@ class ActivityService {
         return { error: 'ALREADY_CHECKED_OUT', message: 'You have already checked out' };
       }
 
-      // Insert heartbeat into user_activity_tracking for metrics only
+      const now = Date.now();
+      const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
+      
+      let lastHeartbeatTs = null;
+      let gapDetected = false;
+      let idleStartTime = null;
+      let gapDurationSeconds = 0;
+
+      // Check if there was a gap in heartbeats (user was idle/inactive)
+      if (cachedActivity) {
+        const parsed = JSON.parse(cachedActivity);
+        lastHeartbeatTs = parsed.lastHeartbeatTs;
+        
+        gapDurationSeconds = (now - lastHeartbeatTs) / 1000;
+        
+        // If more than IDLE_THRESHOLD seconds since last heartbeat, user was idle
+        if (gapDurationSeconds > IDLE_THRESHOLD) {
+          gapDetected = true;
+          // Idle period started IDLE_THRESHOLD seconds after last heartbeat
+          idleStartTime = new Date(lastHeartbeatTs + (IDLE_THRESHOLD * 1000));
+          logger.info(`Gap detected for user ${userId}: ${gapDurationSeconds.toFixed(0)}s since last heartbeat. Idle from ${idleStartTime.toISOString()}`);
+        }
+
+        // Check for Auto-Checkout (Inactive > 60 minutes)
+        if (gapDurationSeconds > AUTO_CHECKOUT_THRESHOLD) {
+          logger.info(`User ${userId} inactive for ${gapDurationSeconds.toFixed(0)}s (> 60m). Auto-checking out.`);
+          await client.query('ROLLBACK');
+          client.release();
+
+          // Perform checkout - this will handle state transitions and close logs
+          const checkoutResult = await attendanceService.checkOut(userId, 'Auto-Checkout', { 
+            reason: 'Inactive > 60m',
+            idleSince: idleStartTime 
+          });
+
+          return {
+            success: false,
+            error: 'AUTO_CHECKED_OUT',
+            message: 'You were automatically checked out due to inactivity',
+            data: checkoutResult
+          };
+        }
+      }
+
+      const currentState = attendance.current_state;
+
+      // If there was a gap and we're not on lunch, handle idle period
+      if (gapDetected && currentState !== 'LUNCH') {
+        
+        // Case 1: User was WORKING, now need to mark as IDLE
+        if (currentState === 'WORKING') {
+          logger.info(`User ${userId} was WORKING but became inactive. Transitioning to IDLE at ${idleStartTime.toISOString()}`);
+          
+          // Apply IDLE transition backdated to when idle actually started
+          attendance = await stateTransitionService.applyStateTransition(
+            attendance,
+            'IDLE',
+            idleStartTime,
+            client
+          );
+
+          // Close any open active activity logs at the idle start time
+          await client.query(
+            `UPDATE activity_logs 
+             SET end_time = $1, duration = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
+             WHERE user_id = $2 AND attendance_record_id = $3 AND end_time IS NULL AND activity_type = 'active'`,
+            [idleStartTime, userId, attendance.id]
+          );
+
+          // Create idle activity log from idle start time to now
+          await client.query(
+            `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+             VALUES ($1, $2, 'idle', $3)`,
+            [userId, attendance.id, idleStartTime]
+          );
+        }
+        // Case 2: User was already IDLE, just continuing idle (no action needed)
+        // The idle log is still open and will be closed when they become active
+      }
+
+      // Now user is active again (heartbeat received)
+      // Transition back to WORKING if currently IDLE
+      if (attendance.current_state === 'IDLE') {
+        logger.info(`User ${userId} became active again. Transitioning from IDLE to WORKING`);
+        
+        attendance = await stateTransitionService.applyStateTransition(
+          attendance,
+          'WORKING',
+          new Date(),
+          client
+        );
+
+        // Close idle activity log
+        await client.query(
+          `UPDATE activity_logs 
+           SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
+           WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL AND activity_type = 'idle'`,
+          [userId, attendance.id]
+        );
+
+        // Start new active activity log
+        await client.query(
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+           VALUES ($1, $2, 'active', NOW())`,
+          [userId, attendance.id]
+        );
+      }
+
+      // Insert heartbeat into user_activity_tracking for metrics
       await client.query(
         `INSERT INTO user_activity_tracking 
          (user_id, attendance_record_id, timestamp, active_window_title, active_application, url, 
@@ -49,105 +157,10 @@ class ActivityService {
         [userId, attendance.id, active_window, active_application, url, mouse_clicks, keyboard_strokes, true, 0]
       );
 
-      const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
-      const now = Date.now();
-
-      // Track the last time we observed input activity
-      let lastInputTs = now;
-      let lastHeartbeatTs = now;
-
-      if (cachedActivity) {
-        const parsed = JSON.parse(cachedActivity);
-        lastInputTs = parsed.lastInputTs || now;
-        lastHeartbeatTs = parsed.lastHeartbeatTs || now;
-      }
-
-      // Calculate gap since last input
-      const gapSeconds = (now - lastInputTs) / 1000;
-
-      // 1. Check for Auto-Checkout (Inactive > 60 minutes)
-      if (gapSeconds > 3600) {
-        logger.info(`User ${userId} inactive for ${gapSeconds}s (> 60m). Auto-checking out.`);
-        await client.query('ROLLBACK'); // Abort current transaction
-
-        // release client before calling external service to avoid deadlock/pool exhaustion
-        client.release();
-
-        // Perform checkout
-        const checkoutResult = await attendanceService.checkOut(userId, 'Auto-Checkout', { reason: 'Inactive > 60m' });
-
-        return {
-          success: false,
-          error: 'AUTO_CHECKED_OUT',
-          message: 'You were automatically checked out due to inactivity',
-          data: checkoutResult
-        };
-      }
-
-      // 2. Check for Idle Gap (Inactive > 5 minutes)
-      // If gap is significant, retroactively mark the gap period as IDLE
-      if (gapSeconds > IDLE_THRESHOLD && attendance.current_state === 'WORKING') {
-        logger.info(`Gap of ${gapSeconds}s detected for user ${userId}. Retroactively setting state to IDLE at ${new Date(lastInputTs).toISOString()}`);
-
-        attendance = await stateTransitionService.applyStateTransition(
-          attendance,
-          'IDLE',
-          new Date(lastInputTs), // Transition at start of gap
-          client
-        );
-      }
-
-      const { is_active } = activityData;
-      // Trust the client's detection but EXCLUDE mouse moves as per requirement
-      // Only count actual keyboard strokes or mouse clicks as "Working" activity
-      // const hasInput = is_active === true || is_active === 'true' || (mouse_clicks + keyboard_strokes) > 0;
-      const hasInput = (mouse_clicks + keyboard_strokes) > 0;
-      if (hasInput) {
-        lastInputTs = now;
-      }
-
-      const secondsSinceInput = (now - lastInputTs) / 1000;
-      const currentShouldBeWorking = hasInput || secondsSinceInput < IDLE_THRESHOLD;
-
-      // Determine desired state based on activity
-      const desiredState = currentShouldBeWorking ? 'WORKING' : 'IDLE';
-      const currentState = attendance.current_state;
-
-      // Apply state transition if state changed
-      // Determines transition time: backdate to lastInputTs for accuracy, but don't go before current state start
-      const lastStateChangeTime = new Date(attendance.last_state_change_at || 0).getTime();
-      const transitionTime = new Date(Math.max(lastInputTs, lastStateChangeTime));
-
-      if (currentState && currentState !== desiredState && currentState !== 'LUNCH') {
-        logger.info(`State transition detected for user ${userId}: ${currentState} → ${desiredState} at ${transitionTime.toISOString()}`);
-
-        attendance = await stateTransitionService.applyStateTransition(
-          attendance,
-          desiredState,
-          transitionTime,
-          client
-        );
-
-        // Update activity_logs for audit trail
-        await client.query(
-          `UPDATE activity_logs 
-           SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
-           WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL`,
-          [userId, attendance.id]
-        );
-
-        const activityType = desiredState === 'WORKING' ? 'active' : 'idle';
-        await client.query(
-          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-           VALUES ($1, $2, $3, NOW())`,
-          [userId, attendance.id, activityType]
-        );
-      }
-
-      // Update Redis with latest activity info
+      // Update Redis with current heartbeat timestamp
       await redisClient.set(
         `user:${userId}:last_activity`,
-        JSON.stringify({ lastInputTs, lastHeartbeatTs: now }),
+        JSON.stringify({ lastHeartbeatTs: now }),
         { EX: 86400 }
       );
 
@@ -157,7 +170,9 @@ class ActivityService {
 
       return {
         success: true,
-        current_state: attendance.current_state
+        current_state: attendance.current_state,
+        was_idle: gapDetected,
+        idle_duration_seconds: gapDetected ? Math.floor(gapDurationSeconds - IDLE_THRESHOLD) : 0
       };
     } catch (error) {
       await client.query('ROLLBACK');
@@ -165,6 +180,109 @@ class ActivityService {
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  // Background job to check for users who haven't sent heartbeats
+  async checkForIdleUsers() {
+    try {
+      const today = formatDate(new Date());
+      
+      // Get all users who are checked in but haven't checked out
+      const activeUsers = await pool.query(
+        `SELECT ar.*, u.id as user_id 
+         FROM attendance_records ar
+         JOIN users u ON ar.user_id = u.id
+         WHERE ar.date = $1 AND ar.check_out_time IS NULL AND ar.current_state IN ('WORKING', 'IDLE')`,
+        [today]
+      );
+
+      const now = Date.now();
+
+      for (const record of activeUsers.rows) {
+        const userId = record.user_id;
+        const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
+        
+        if (cachedActivity) {
+          const parsed = JSON.parse(cachedActivity);
+          const lastHeartbeatTs = parsed.lastHeartbeatTs;
+          const secondsSinceLastHeartbeat = (now - lastHeartbeatTs) / 1000;
+          
+          // Check for auto-checkout first
+          if (secondsSinceLastHeartbeat > AUTO_CHECKOUT_THRESHOLD) {
+            logger.info(`Background check: User ${userId} inactive for ${secondsSinceLastHeartbeat.toFixed(0)}s. Auto-checking out.`);
+            
+            const idleStartTime = new Date(lastHeartbeatTs + (IDLE_THRESHOLD * 1000));
+            await attendanceService.checkOut(userId, 'Auto-Checkout', { 
+              reason: 'Inactive > 60m',
+              idleSince: idleStartTime 
+            });
+            continue;
+          }
+          
+          // If more than IDLE_THRESHOLD and currently WORKING, mark as IDLE
+          if (secondsSinceLastHeartbeat > IDLE_THRESHOLD && record.current_state === 'WORKING') {
+            const idleStartTime = new Date(lastHeartbeatTs + (IDLE_THRESHOLD * 1000));
+            
+            logger.info(`Background check: User ${userId} idle since ${idleStartTime.toISOString()}`);
+            
+            const client = await pool.connect();
+            try {
+              await client.query('BEGIN');
+
+              // Fetch fresh attendance record
+              const freshAttendance = await client.query(
+                'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2',
+                [userId, today]
+              );
+
+              if (freshAttendance.rows.length === 0) {
+                await client.query('ROLLBACK');
+                continue;
+              }
+
+              let attendance = freshAttendance.rows[0];
+
+              // Double-check state hasn't changed
+              if (attendance.current_state === 'WORKING') {
+                attendance = await stateTransitionService.applyStateTransition(
+                  attendance,
+                  'IDLE',
+                  idleStartTime,
+                  client
+                );
+
+                // Close active logs and create idle log
+                await client.query(
+                  `UPDATE activity_logs 
+                   SET end_time = $1, duration = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
+                   WHERE user_id = $2 AND attendance_record_id = $3 AND end_time IS NULL AND activity_type = 'active'`,
+                  [idleStartTime, userId, record.id]
+                );
+
+                await client.query(
+                  `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+                   VALUES ($1, $2, 'idle', $3)`,
+                  [userId, record.id, idleStartTime]
+                );
+
+                await redisClient.set(`user:${userId}:current_state`, 'IDLE', { EX: 86400 });
+
+                await client.query('COMMIT');
+              } else {
+                await client.query('ROLLBACK');
+              }
+            } catch (error) {
+              await client.query('ROLLBACK');
+              logger.error(`Error marking user ${userId} as idle:`, error);
+            } finally {
+              client.release();
+            }
+          }
+        }
+      }
+    } catch (error) {
+      logger.error('Error in checkForIdleUsers:', error);
     }
   }
 
@@ -186,7 +304,6 @@ class ActivityService {
   async getActivityHistory(userId, date) {
     const targetDate = date || formatDate(new Date());
 
-    // Fetch raw tracking data joined with attendance records to filter by date
     const result = await pool.query(
       `SELECT uat.* 
        FROM user_activity_tracking uat
@@ -207,27 +324,19 @@ class ActivityService {
       const log = rawLogs[i];
       const nextLog = rawLogs[i + 1];
 
-      // Calculate duration for this heartbeat
       let duration = 0;
       if (nextLog) {
         const diff = (new Date(nextLog.timestamp) - new Date(log.timestamp)) / 1000;
-        // If gap is less than 5 minutes, consider it part of the session. 
-        // Otherwise, it's a gap (stop/offline), so cap the duration of this last heartbeat.
         if (diff < 300) {
           duration = diff;
         } else {
-          duration = 30; // Default heartbeat interval assumption
+          duration = 30;
         }
       } else {
-        duration = 30; // Default for the very last log
+        duration = 30;
       }
 
       const isIdle = !log.is_active;
-      // If idle, we might want to group them as "Idle" regardless of app, 
-      // or show the app but mark as idle. 
-      // The UI shows activity_type 'active'/'idle'.
-      // Let's group by app/window too, but break if activity_type changes.
-
       const activityType = isIdle ? 'idle' : 'active';
       const appName = log.active_application || 'Unknown';
       const windowTitle = log.active_window_title || '-';
@@ -237,18 +346,14 @@ class ActivityService {
         currentGroup.active_window_title === windowTitle &&
         currentGroup.activity_type === activityType
       ) {
-        // Continue group
         currentGroup.duration += duration;
         currentGroup.mouse_clicks += (log.mouse_clicks || 0);
         currentGroup.keyboard_strokes += (log.keyboard_strokes || 0);
-        // Update end time
         currentGroup.end_time = new Date(new Date(currentGroup.start_time).getTime() + currentGroup.duration * 1000);
       } else {
-        // Push previous group
         if (currentGroup) {
           aggregatedLogs.push(currentGroup);
         }
-        // Start new group
         currentGroup = {
           start_time: log.timestamp,
           end_time: new Date(new Date(log.timestamp).getTime() + duration * 1000),
@@ -262,7 +367,6 @@ class ActivityService {
       }
     }
 
-    // Push the last group
     if (currentGroup) {
       aggregatedLogs.push(currentGroup);
     }
@@ -300,7 +404,6 @@ class ActivityService {
         return { error: 'BREAK_ALREADY_STARTED', message: 'Lunch break already in progress' };
       }
 
-      // Transition to LUNCH state
       attendance = await stateTransitionService.applyStateTransition(
         attendance,
         'LUNCH',
@@ -308,7 +411,6 @@ class ActivityService {
         client
       );
 
-      // Close any open activity logs
       await client.query(
         `UPDATE activity_logs 
          SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
@@ -316,7 +418,6 @@ class ActivityService {
         [userId, attendance.id]
       );
 
-      // Insert lunch_breaks record for audit trail
       const breakResult = await client.query(
         `INSERT INTO lunch_breaks (user_id, attendance_record_id, break_start_time, start_location) 
          VALUES ($1, $2, NOW(), $3) 
@@ -324,14 +425,12 @@ class ActivityService {
         [userId, attendance.id, location ? JSON.stringify(location) : null]
       );
 
-      // Insert activity_logs entry for audit trail
       await client.query(
         `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
          VALUES ($1, $2, 'lunch_break', NOW())`,
         [userId, attendance.id]
       );
 
-      // Update Redis
       await redisClient.set(`user:${userId}:current_state`, 'LUNCH', { EX: 86400 });
 
       await client.query('COMMIT');
@@ -375,7 +474,6 @@ class ActivityService {
         return { error: 'NO_ACTIVE_BREAK', message: 'No active lunch break found' };
       }
 
-      // Transition back to WORKING state
       attendance = await stateTransitionService.applyStateTransition(
         attendance,
         'WORKING',
@@ -383,7 +481,6 @@ class ActivityService {
         client
       );
 
-      // Update lunch_breaks record
       const updatedBreak = await client.query(
         `UPDATE lunch_breaks 
          SET break_end_time = NOW(), 
@@ -395,7 +492,6 @@ class ActivityService {
         [location ? JSON.stringify(location) : null, breakResult.rows[0].id]
       );
 
-      // Close lunch_break activity log
       await client.query(
         `UPDATE activity_logs 
          SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
@@ -403,14 +499,12 @@ class ActivityService {
         [userId, attendance.id]
       );
 
-      // Start new active activity log
       await client.query(
         `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
          VALUES ($1, $2, 'active', NOW())`,
         [userId, attendance.id]
       );
 
-      // Update Redis
       await redisClient.set(`user:${userId}:current_state`, 'WORKING', { EX: 86400 });
 
       await client.query('COMMIT');
