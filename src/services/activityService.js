@@ -61,7 +61,9 @@ class ActivityService {
         lastHeartbeatTs = parsed.lastHeartbeatTs || now;
       }
 
-      const hasInput = (mouse_clicks + keyboard_strokes) > 0;
+      const { is_active } = activityData;
+      // Trust the client's detection (includes mouse moves, clicks, keys)
+      const hasInput = is_active === true || is_active === 'true' || (mouse_clicks + keyboard_strokes) > 0;
       if (hasInput) {
         lastInputTs = now;
       }
@@ -74,13 +76,17 @@ class ActivityService {
       const currentState = attendance.current_state;
 
       // Apply state transition if state changed
+      // Determines transition time: backdate to lastInputTs for accuracy, but don't go before current state start
+      const lastStateChangeTime = new Date(attendance.last_state_change_at || 0).getTime();
+      const transitionTime = new Date(Math.max(lastInputTs, lastStateChangeTime));
+
       if (currentState && currentState !== desiredState && currentState !== 'LUNCH') {
-        logger.info(`State transition detected for user ${userId}: ${currentState} → ${desiredState}`);
+        logger.info(`State transition detected for user ${userId}: ${currentState} → ${desiredState} at ${transitionTime.toISOString()}`);
 
         attendance = await stateTransitionService.applyStateTransition(
           attendance,
           desiredState,
-          new Date(),
+          transitionTime,
           client
         );
 
@@ -104,7 +110,7 @@ class ActivityService {
       await redisClient.set(
         `user:${userId}:last_activity`,
         JSON.stringify({ lastInputTs, lastHeartbeatTs: now }),
-        { EX: 600 }
+        { EX: 86400 }
       );
 
       await redisClient.set(`user:${userId}:current_state`, attendance.current_state, { EX: 86400 });

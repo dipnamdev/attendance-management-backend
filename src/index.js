@@ -11,6 +11,7 @@ const logger = require('./utils/logger');
 const runDailyAggregation = require('./jobs/dailyAggregation');
 const autoCloseExcessiveBreaks = require('./jobs/autoCloseBreaks');
 const autoCheckOutUsers = require('./jobs/autoCheckOut');
+const autoCheckOutIdleUsers = require('./jobs/autoCheckOutIdle');
 const createDailyAttendance = require('./jobs/createDailyAttendance');
 const cleanupOldData = require('./jobs/cleanupOldData');
 
@@ -83,6 +84,15 @@ cron.schedule('*/5 * * * *', async () => {
     await autoCloseExcessiveBreaks();
   } catch (error) {
     logger.error('Auto-close excessive breaks job failed:', error);
+  }
+});
+
+// Auto-checkout excessive idle job (Every 5 minutes)
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    await autoCheckOutIdleUsers();
+  } catch (error) {
+    logger.error('Auto-checkout idle users job failed:', error);
   }
 });
 

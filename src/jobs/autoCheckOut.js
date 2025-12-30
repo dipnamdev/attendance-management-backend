@@ -74,7 +74,31 @@ async function autoCheckOutUsers(targetDate) {
                 let attendance = attendanceResult.rows[0];
 
                 // Finalize current state at end of day
+                // Finalize current state at end of day
                 const stateTransitionService = require('../services/stateTransitionService');
+
+                // FIX: Detect if user stopped sending heartbeats (e.g. PC shutdown/Sleep) while WORKING
+                if (attendance.current_state === 'WORKING') {
+                    const lastActivityRes = await client.query(
+                        `SELECT MAX(timestamp) as last_ts FROM user_activity_tracking WHERE attendance_record_id = $1`,
+                        [attendance.id]
+                    );
+                    const lastHeartbeat = lastActivityRes.rows[0]?.last_ts ? new Date(lastActivityRes.rows[0].last_ts) : null;
+
+                    // If last heartbeat was significantly before EndOfDay (e.g. > 15 mins), assume they went idle/offline then
+                    if (lastHeartbeat && (recordEndOfDay.getTime() - lastHeartbeat.getTime() > 15 * 60 * 1000)) {
+                        logger.info(`User ${record.user_id} stopped tracking at ${lastHeartbeat.toISOString()}. Switching to IDLE before auto-checkout.`);
+                        // Transition to IDLE effectively at user's last known active time
+                        // This ensures the time from Shutdown -> EndOfDay counts as IDLE, not ACTIVE
+                        attendance = await stateTransitionService.applyStateTransition(
+                            attendance,
+                            'IDLE',
+                            lastHeartbeat,
+                            client
+                        );
+                    }
+                }
+
                 attendance = await stateTransitionService.finalizeState(
                     attendance,
                     recordEndOfDay,
