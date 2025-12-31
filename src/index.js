@@ -96,6 +96,18 @@ cron.schedule('*/5 * * * *', async () => {
   }
 });
 
+// Gap Detection Job (Every 1 minute)
+// Checks for users who stopped sending heartbeats (e.g. Tracker closed/crashed)
+// Transitions them to IDLE after 5 minutes of silence.
+const activityService = require('./services/activityService');
+cron.schedule('* * * * *', async () => {
+  try {
+    await activityService.checkForIdleUsers();
+  } catch (error) {
+    logger.error('Gap detection job failed:', error);
+  }
+});
+
 // Auto-checkout job (Daily at 23:59) - use explicit timezone if provided
 const serverTimeZone = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 logger.info(`Scheduling auto-checkout job to run at 23:59 server timezone: ${serverTimeZone}`);

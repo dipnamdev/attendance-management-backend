@@ -16,7 +16,11 @@ class ActivityService {
       url,
       mouse_clicks = 0,
       keyboard_strokes = 0,
+      idle_time_seconds = 0,
     } = activityData;
+
+    // DEBUG LOG
+    logger.info(`Heartbeat for ${userId}: clicks=${mouse_clicks}, keys=${keyboard_strokes}, is_active=${activityData.is_active}, activeWindow=${active_window}`);
 
     const client = await pool.connect();
     try {
@@ -42,125 +46,113 @@ class ActivityService {
 
       const now = Date.now();
       const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
-      
-      let lastHeartbeatTs = null;
-      let gapDetected = false;
-      let idleStartTime = null;
-      let gapDurationSeconds = 0;
 
-      // Check if there was a gap in heartbeats (user was idle/inactive)
-      if (cachedActivity) {
+      let lastInputTs = now; // Initialize lastInputTs
+
+      // REVISED LOGIC: Trust the client's idle_time_seconds
+      if (idle_time_seconds > 0) {
+        lastInputTs = now - (idle_time_seconds * 1000);
+      } else if (cachedActivity) {
+        // Fallback or verify with cache
         const parsed = JSON.parse(cachedActivity);
-        lastHeartbeatTs = parsed.lastHeartbeatTs;
-        
-        gapDurationSeconds = (now - lastHeartbeatTs) / 1000;
-        
-        // If more than IDLE_THRESHOLD seconds since last heartbeat, user was idle
-        if (gapDurationSeconds > IDLE_THRESHOLD) {
-          gapDetected = true;
-          // Idle period started IDLE_THRESHOLD seconds after last heartbeat
-          idleStartTime = new Date(lastHeartbeatTs + (IDLE_THRESHOLD * 1000));
-          logger.info(`Gap detected for user ${userId}: ${gapDurationSeconds.toFixed(0)}s since last heartbeat. Idle from ${idleStartTime.toISOString()}`);
-        }
+        // Only use cache if it suggests a MORE recent input than our calculation?
+        // No, client is truth. If client says "I am active" (idle=0), then lastInputTs = now.
+        // If client says "Idle 10s", then lastInputTs = now - 10s.
+        // We only use cache for "Gap Detection" (if no heartbeat received).
+        // But here we HAVE a heartbeat. So we trust the heartbeat.
 
-        // Check for Auto-Checkout (Inactive > 60 minutes)
-        if (gapDurationSeconds > AUTO_CHECKOUT_THRESHOLD) {
-          logger.info(`User ${userId} inactive for ${gapDurationSeconds.toFixed(0)}s (> 60m). Auto-checking out.`);
-          await client.query('ROLLBACK');
-          client.release();
-
-          // Perform checkout - this will handle state transitions and close logs
-          const checkoutResult = await attendanceService.checkOut(userId, 'Auto-Checkout', { 
-            reason: 'Inactive > 60m',
-            idleSince: idleStartTime 
-          });
-
-          return {
-            success: false,
-            error: 'AUTO_CHECKED_OUT',
-            message: 'You were automatically checked out due to inactivity',
-            data: checkoutResult
-          };
-        }
+        // However, we must ensure we don't accidentally "reset" idle time if the client sends a weird 0
+        // when they shouldn't. But the client logic is solid now.
       }
+
+      // Check for Auto-Checkout (Inactive > 60 minutes)
+      const currentGapSeconds = (now - lastInputTs) / 1000;
+
+      logger.info(`Gap analysis: now=${new Date(now).toISOString()}, lastInput=${new Date(lastInputTs).toISOString()}, gap=${currentGapSeconds}s, current_state=${attendance.current_state}`);
+
+      if (currentGapSeconds > 3600) {
+        logger.info(`User ${userId} inactive for ${currentGapSeconds}s (> 60m). Auto-checking out.`);
+        await client.query('ROLLBACK');
+        client.release();
+
+        const checkoutResult = await attendanceService.checkOut(userId, 'Auto-Checkout', { reason: 'Inactive > 60m' });
+
+        return {
+          success: false,
+          error: 'AUTO_CHECKED_OUT',
+          message: 'You were automatically checked out due to inactivity',
+          data: checkoutResult
+        };
+      }
+
+      // 2. Check for Idle Gap (Inactive > 5 minutes)
+      // If client says idle > 5 mins, we trust it.
+      if (currentGapSeconds > IDLE_THRESHOLD && attendance.current_state === 'WORKING') {
+        logger.info(`DETECTED IDLE GAP > 5m via Heartbeat. Transitioning to IDLE.`);
+        attendance = await stateTransitionService.applyStateTransition(attendance, 'IDLE', new Date(lastInputTs), client);
+      }
+
+      const { is_active } = activityData;
+      // Trust the client's detection but EXCLUDE mouse moves as per requirement
+      // If client sends idle_time_seconds > 0, then hasInput is effectively false for THIS heartbeat moment
+      // unless clicks > 0 (which means they JUST came back).
+      const hasInput = (mouse_clicks + keyboard_strokes) > 0;
+
+      logger.info(`Input detection: hasInput=${hasInput} (clicks=${mouse_clicks}, keys=${keyboard_strokes}). idle_time=${idle_time_seconds}`);
+
+      if (hasInput) {
+        lastInputTs = now;
+      }
+
+      const secondsSinceInput = (now - lastInputTs) / 1000;
+      const currentShouldBeWorking = hasInput || secondsSinceInput < IDLE_THRESHOLD;
+      const desiredState = currentShouldBeWorking ? 'WORKING' : 'IDLE';
+
+      logger.info(`State Decision: secondsSinceInput=${secondsSinceInput}, shouldWorking=${currentShouldBeWorking}, desired=${desiredState}, current=${attendance.current_state}`);
 
       const currentState = attendance.current_state;
+      const lastStateChangeTime = new Date(attendance.last_state_change_at || 0).getTime();
+      const transitionTime = new Date(Math.max(lastInputTs, lastStateChangeTime));
 
-      // If there was a gap and we're not on lunch, handle idle period
-      if (gapDetected && currentState !== 'LUNCH') {
-        
-        // Case 1: User was WORKING, now need to mark as IDLE
-        if (currentState === 'WORKING') {
-          logger.info(`User ${userId} was WORKING but became inactive. Transitioning to IDLE at ${idleStartTime.toISOString()}`);
-          
-          // Apply IDLE transition backdated to when idle actually started
-          attendance = await stateTransitionService.applyStateTransition(
-            attendance,
-            'IDLE',
-            idleStartTime,
-            client
-          );
+      if (currentState && currentState !== desiredState && currentState !== 'LUNCH') {
+        logger.info(`State transition detected for user ${userId}: ${currentState} → ${desiredState} at ${transitionTime.toISOString()}`);
 
-          // Close any open active activity logs at the idle start time
-          await client.query(
-            `UPDATE activity_logs 
-             SET end_time = $1, duration = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
-             WHERE user_id = $2 AND attendance_record_id = $3 AND end_time IS NULL AND activity_type = 'active'`,
-            [idleStartTime, userId, attendance.id]
-          );
-
-          // Create idle activity log from idle start time to now
-          await client.query(
-            `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-             VALUES ($1, $2, 'idle', $3)`,
-            [userId, attendance.id, idleStartTime]
-          );
-        }
-        // Case 2: User was already IDLE, just continuing idle (no action needed)
-        // The idle log is still open and will be closed when they become active
-      }
-
-      // Now user is active again (heartbeat received)
-      // Transition back to WORKING if currently IDLE
-      if (attendance.current_state === 'IDLE') {
-        logger.info(`User ${userId} became active again. Transitioning from IDLE to WORKING`);
-        
         attendance = await stateTransitionService.applyStateTransition(
           attendance,
-          'WORKING',
-          new Date(),
+          desiredState,
+          transitionTime,
           client
         );
 
-        // Close idle activity log
+        // Update activity_logs for audit trail
         await client.query(
-          `UPDATE activity_logs 
+          `UPDATE activity_logs
            SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
-           WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL AND activity_type = 'idle'`,
+           WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL`,
           [userId, attendance.id]
         );
 
-        // Start new active activity log
+        const activityType = desiredState === 'WORKING' ? 'active' : 'idle';
         await client.query(
-          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
-           VALUES ($1, $2, 'active', NOW())`,
-          [userId, attendance.id]
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time)
+           VALUES ($1, $2, $3, NOW())`,
+          [userId, attendance.id, activityType]
         );
       }
 
       // Insert heartbeat into user_activity_tracking for metrics
       await client.query(
-        `INSERT INTO user_activity_tracking 
-         (user_id, attendance_record_id, timestamp, active_window_title, active_application, url, 
-          mouse_clicks, keyboard_strokes, is_active, idle_time_seconds) 
+        `INSERT INTO user_activity_tracking
+         (user_id, attendance_record_id, timestamp, active_window_title, active_application, url,
+          mouse_clicks, keyboard_strokes, is_active, idle_time_seconds)
          VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7, $8, $9)`,
         [userId, attendance.id, active_window, active_application, url, mouse_clicks, keyboard_strokes, true, 0]
       );
 
-      // Update Redis with current heartbeat timestamp
+      // Update Redis with latest activity info
       await redisClient.set(
         `user:${userId}:last_activity`,
-        JSON.stringify({ lastHeartbeatTs: now }),
+        JSON.stringify({ lastInputTs, lastHeartbeatTs: now }),
         { EX: 86400 }
       );
 
@@ -170,9 +162,7 @@ class ActivityService {
 
       return {
         success: true,
-        current_state: attendance.current_state,
-        was_idle: gapDetected,
-        idle_duration_seconds: gapDetected ? Math.floor(gapDurationSeconds - IDLE_THRESHOLD) : 0
+        current_state: attendance.current_state
       };
     } catch (error) {
       await client.query('ROLLBACK');
@@ -187,7 +177,7 @@ class ActivityService {
   async checkForIdleUsers() {
     try {
       const today = formatDate(new Date());
-      
+
       // Get all users who are checked in but haven't checked out
       const activeUsers = await pool.query(
         `SELECT ar.*, u.id as user_id 
@@ -202,30 +192,30 @@ class ActivityService {
       for (const record of activeUsers.rows) {
         const userId = record.user_id;
         const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
-        
+
         if (cachedActivity) {
           const parsed = JSON.parse(cachedActivity);
           const lastHeartbeatTs = parsed.lastHeartbeatTs;
           const secondsSinceLastHeartbeat = (now - lastHeartbeatTs) / 1000;
-          
+
           // Check for auto-checkout first
           if (secondsSinceLastHeartbeat > AUTO_CHECKOUT_THRESHOLD) {
             logger.info(`Background check: User ${userId} inactive for ${secondsSinceLastHeartbeat.toFixed(0)}s. Auto-checking out.`);
-            
+
             const idleStartTime = new Date(lastHeartbeatTs + (IDLE_THRESHOLD * 1000));
-            await attendanceService.checkOut(userId, 'Auto-Checkout', { 
+            await attendanceService.checkOut(userId, 'Auto-Checkout', {
               reason: 'Inactive > 60m',
-              idleSince: idleStartTime 
+              idleSince: idleStartTime
             });
             continue;
           }
-          
+
           // If more than IDLE_THRESHOLD and currently WORKING, mark as IDLE
           if (secondsSinceLastHeartbeat > IDLE_THRESHOLD && record.current_state === 'WORKING') {
             const idleStartTime = new Date(lastHeartbeatTs + (IDLE_THRESHOLD * 1000));
-            
+
             logger.info(`Background check: User ${userId} idle since ${idleStartTime.toISOString()}`);
-            
+
             const client = await pool.connect();
             try {
               await client.query('BEGIN');
