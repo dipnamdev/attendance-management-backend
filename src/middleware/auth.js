@@ -22,7 +22,7 @@ const authenticateToken = (req, res, next) => {
     req.user = decoded;
     next();
   } catch (error) {
-    return errorResponse(res, 'INVALID_TOKEN', 'Invalid or expired token', 403);
+    return errorResponse(res, 'INVALID_TOKEN', 'Invalid or expired token', 401);
   }
 };
 
