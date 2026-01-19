@@ -5,8 +5,8 @@ const logger = require('../utils/logger');
 const stateTransitionService = require('./stateTransitionService');
 const attendanceService = require('./attendanceService');
 
-const IDLE_THRESHOLD = 300; // 5 minutes in seconds
-const AUTO_CHECKOUT_THRESHOLD = 3600; // 60 minutes in seconds
+const IDLE_THRESHOLD = 600; // 10 minutes in seconds
+const AUTO_CHECKOUT_THRESHOLD = 7200; // 120 minutes in seconds
 
 class ActivityService {
   async processHeartbeat(userId, activityData) {
