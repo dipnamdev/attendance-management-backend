@@ -125,18 +125,19 @@ class ActivityService {
         );
 
         // Update activity_logs for audit trail
+        // Use transitionTime instead of NOW() to properly reflect when the state actually changed based on input
         await client.query(
           `UPDATE activity_logs
-           SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
+           SET end_time = $3, duration = EXTRACT(EPOCH FROM ($3 - start_time))::INTEGER
            WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL`,
-          [userId, attendance.id]
+          [userId, attendance.id, transitionTime]
         );
 
         const activityType = desiredState === 'WORKING' ? 'active' : 'idle';
         await client.query(
           `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time)
-           VALUES ($1, $2, $3, NOW())`,
-          [userId, attendance.id, activityType]
+           VALUES ($1, $2, $3, $4)`,
+          [userId, attendance.id, activityType, transitionTime]
         );
       }
 

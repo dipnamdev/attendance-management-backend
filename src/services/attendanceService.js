@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+
 const { redisClient } = require('../config/redis');
 const { calculateDuration, formatDate } = require('../utils/helpers');
 const logger = require('../utils/logger');
@@ -284,16 +285,51 @@ class AttendanceService {
     if (attendance.current_state && attendance.last_state_change_at) {
       const currentStateDuration = stateTransitionService.getCurrentStateDuration(attendance, now);
 
-      switch (currentStateDuration.state) {
-        case 'WORKING':
+      if (attendance.current_state === 'WORKING') {
+        // Check for "silence" (tracker closed/crashed)
+        // validStates are WORKING, IDLE, LUNCH.
+        // If WORKING, we must check if we have received a recent heartbeat.
+        const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
+        let silenceDuration = 0;
+
+        if (cachedActivity) {
+          const parsed = JSON.parse(cachedActivity);
+          const lastHeartbeatTs = parsed.lastHeartbeatTs;
+          // Ensure lastHeartbeatTs is not in the future and is after the last state change
+          if (lastHeartbeatTs && lastHeartbeatTs > new Date(attendance.last_state_change_at).getTime()) {
+            const gap = (now.getTime() - lastHeartbeatTs) / 1000;
+            // If gap > 10 minutes (600s), treat it as IDLE time
+            // BUT we must not double count.
+            // Total duration in state = currentStateDuration.duration
+            // Active portion = (lastHeartbeat - lastStateChange)
+            // (Or if lastHeartbeat < lastStateChange, then 0 active added here? No, stick to the robust logic below)
+
+            // Let's stick to the logic:
+            // If gap > 600s, then "real" active ended at lastHeartbeatTs.
+            // Currently accumuated: currentStateDuration.duration
+            // We should split this.
+            if (gap > 600) {
+              silenceDuration = gap;
+            }
+          }
+        }
+
+        if (silenceDuration > 0) {
+          // Split the current duration
+          // Total duration = currentStateDuration.duration
+          // The "silence" part is Idle. The rest is Active.
+          const forcedIdle = silenceDuration;
+          const forcedActive = Math.max(0, currentStateDuration.duration - forcedIdle);
+
+          totalActive += forcedActive;
+          totalIdle += forcedIdle;
+        } else {
           totalActive += currentStateDuration.duration;
-          break;
-        case 'IDLE':
-          totalIdle += currentStateDuration.duration;
-          break;
-        case 'LUNCH':
-          totalBreak += currentStateDuration.duration;
-          break;
+        }
+      } else if (attendance.current_state === 'IDLE') {
+        totalIdle += currentStateDuration.duration;
+      } else if (attendance.current_state === 'LUNCH') {
+        totalBreak += currentStateDuration.duration;
       }
     }
 
@@ -342,9 +378,77 @@ class AttendanceService {
        * at that record's end-of-day (23:59:59), which effectively simulates an
        * automatic checkout at the end of the working day.
        */
+      // If record is for today and NOT checked out, calculate using counters + current state (Same as getTodayAttendance)
       const now = new Date();
-      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const recordDateObj = new Date(record.date);
+      const isToday = recordDateObj.toDateString() === now.toDateString();
+
+      if (isToday && !record.check_out_time) {
+        // Get accumulated time from state counters
+        let totalActive = record.active_seconds || 0;
+        let totalIdle = record.idle_seconds || 0;
+        let totalBreak = record.lunch_seconds || 0;
+
+        // Add current state duration
+        if (record.current_state && record.last_state_change_at) {
+          const currentStateDuration = stateTransitionService.getCurrentStateDuration(record, now);
+
+          if (record.current_state === 'WORKING') {
+            // Check for "silence" (tracker closed/crashed)
+            const cachedActivity = await redisClient.get(`user:${targetUserId}:last_activity`);
+            let silenceDuration = 0;
+
+            if (cachedActivity) {
+              const parsed = JSON.parse(cachedActivity);
+              const lastHeartbeatTs = parsed.lastHeartbeatTs;
+
+              if (lastHeartbeatTs && lastHeartbeatTs > new Date(record.last_state_change_at).getTime()) {
+                const gap = (now.getTime() - lastHeartbeatTs) / 1000;
+                if (gap > 600) {
+                  silenceDuration = gap;
+                }
+              }
+            }
+
+            if (silenceDuration > 0) {
+              const forcedIdle = silenceDuration;
+              const forcedActive = Math.max(0, currentStateDuration.duration - forcedIdle);
+
+              totalActive += forcedActive;
+              totalIdle += forcedIdle;
+            } else {
+              totalActive += currentStateDuration.duration;
+            }
+          } else if (record.current_state === 'IDLE') {
+            totalIdle += currentStateDuration.duration;
+          } else if (record.current_state === 'LUNCH') {
+            totalBreak += currentStateDuration.duration;
+          }
+        }
+
+        // Calculate total work time: active + idle (excludes lunch)
+        const totalWork = totalActive + totalIdle;
+        const trackedTime = totalActive + totalIdle;
+
+        return {
+          ...record,
+          total_work_duration: totalWork > 0 ? totalWork : 0,
+          total_active_duration: totalActive,
+          total_idle_duration: totalIdle,
+          total_break_duration: totalBreak,
+          tracked_time: trackedTime,
+          untracked_time: 0
+        };
+      }
+
+      /**
+       * For past records without a checkout time we calculate durations in "real time".
+       * However, if the record date is in the past (before today) we should NOT
+       * keep accumulating time indefinitely. In those cases we cap the end time
+       * at that record's end-of-day (23:59:59), which effectively simulates an
+       * automatic checkout at the end of the working day.
+       */
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const recordDateOnly = new Date(
         recordDateObj.getFullYear(),
         recordDateObj.getMonth(),
