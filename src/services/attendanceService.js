@@ -293,24 +293,28 @@ class AttendanceService {
         let silenceDuration = 0;
 
         if (cachedActivity) {
-          const parsed = JSON.parse(cachedActivity);
-          const lastHeartbeatTs = parsed.lastHeartbeatTs;
-          // Ensure lastHeartbeatTs is not in the future and is after the last state change
-          if (lastHeartbeatTs && lastHeartbeatTs > new Date(attendance.last_state_change_at).getTime()) {
-            const gap = (now.getTime() - lastHeartbeatTs) / 1000;
-            // If gap > 10 minutes (600s), treat it as IDLE time
-            // BUT we must not double count.
-            // Total duration in state = currentStateDuration.duration
-            // Active portion = (lastHeartbeat - lastStateChange)
-            // (Or if lastHeartbeat < lastStateChange, then 0 active added here? No, stick to the robust logic below)
+          try {
+            const parsed = JSON.parse(cachedActivity);
+            const lastHeartbeatTs = parsed.lastHeartbeatTs;
+            // Ensure lastHeartbeatTs is not in the future and is after the last state change
+            if (lastHeartbeatTs && lastHeartbeatTs > new Date(attendance.last_state_change_at).getTime()) {
+              const gap = (now.getTime() - lastHeartbeatTs) / 1000;
+              // If gap > 10 minutes (600s), treat it as IDLE time
+              // BUT we must not double count.
+              // Total duration in state = currentStateDuration.duration
+              // Active portion = (lastHeartbeat - lastStateChange)
+              // (Or if lastHeartbeat < lastStateChange, then 0 active added here? No, stick to the robust logic below)
 
-            // Let's stick to the logic:
-            // If gap > 600s, then "real" active ended at lastHeartbeatTs.
-            // Currently accumuated: currentStateDuration.duration
-            // We should split this.
-            if (gap > 600) {
-              silenceDuration = gap;
+              // Let's stick to the logic:
+              // If gap > 600s, then "real" active ended at lastHeartbeatTs.
+              // Currently accumuated: currentStateDuration.duration
+              // We should split this.
+              if (gap > 600) {
+                silenceDuration = gap;
+              }
             }
+          } catch (err) {
+            logger.warn(`Error parsing cached activity for user ${userId}:`, err);
           }
         }
 
@@ -395,18 +399,22 @@ class AttendanceService {
 
           if (record.current_state === 'WORKING') {
             // Check for "silence" (tracker closed/crashed)
-            const cachedActivity = await redisClient.get(`user:${targetUserId}:last_activity`);
+            const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
             let silenceDuration = 0;
 
             if (cachedActivity) {
-              const parsed = JSON.parse(cachedActivity);
-              const lastHeartbeatTs = parsed.lastHeartbeatTs;
+              try {
+                const parsed = JSON.parse(cachedActivity);
+                const lastHeartbeatTs = parsed.lastHeartbeatTs;
 
-              if (lastHeartbeatTs && lastHeartbeatTs > new Date(record.last_state_change_at).getTime()) {
-                const gap = (now.getTime() - lastHeartbeatTs) / 1000;
-                if (gap > 600) {
-                  silenceDuration = gap;
+                if (lastHeartbeatTs && lastHeartbeatTs > new Date(record.last_state_change_at).getTime()) {
+                  const gap = (now.getTime() - lastHeartbeatTs) / 1000;
+                  if (gap > 600) {
+                    silenceDuration = gap;
+                  }
                 }
+              } catch (err) {
+                logger.warn(`Error checking redis for history gap user ${userId}:`, err);
               }
             }
 
