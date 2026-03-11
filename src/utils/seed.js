@@ -27,10 +27,13 @@ async function seedData() {
     }
 
     const employees = [
-      { email: 'test1@gmail.com', name: 'Test1 Dipesh', employee_id: 'EMP011' },
-      { email: 'test2@gmail.com', name: 'Test2 Prerit', employee_id: 'EMP012' },
-      { email: 'test3@gmail.com', name: 'Test3 User', employee_id: 'EMP013' },
-      { email: 'test4@gmail.com', name: 'Test4 Akshay', employee_id: 'EMP014' },
+      { email: 'dipesh3rde@gmail.com', name: 'Dipesh Namdev', employee_id: 'EMP011' },
+      // { email: 'prerit3rde@gmail.com', name: 'Prerit Limanpure', employee_id: 'EMP012' },
+      // { email: 'akshay3rde@gmail.com', name: 'Akshay Suryavanshi', employee_id: 'EMP013' },
+      // { email: 'ruchi3rde@gmail.com', name: 'Ruchi Trivedi', employee_id: 'EMP014' },
+      // { email: 'arbaz3rde@gmail.com', name: 'Ruchi Trivedi', employee_id: 'EMP014' },
+      // { email: 'ruchi3rde@gmail.com', name: 'Ruchi Trivedi', employee_id: 'EMP014' },
+      // { email: 'ruchi3rde@gmail.com', name: 'Ruchi Trivedi', employee_id: 'EMP014' },
     ];
 
     for (const employee of employees) {
@@ -85,10 +88,7 @@ async function seedData() {
 
     logger.info('✅ Data seeding completed successfully!');
     logger.info('\n📝 Login Credentials:');
-    logger.info('   Admin: admin@company.com / admin123');
-    logger.info('   Employee: john.doe@company.com / employee123');
-    logger.info('   Employee: jane.smith@company.com / employee123');
-    logger.info('   Employee: mike.johnson@company.com / employee123\n');
+    logger.info('   Admin: admin@company.com / admin123')
 
   } catch (error) {
     await client.query('ROLLBACK');
