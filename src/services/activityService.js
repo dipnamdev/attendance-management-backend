@@ -4,6 +4,7 @@ const { formatDate } = require('../utils/helpers');
 const logger = require('../utils/logger');
 const stateTransitionService = require('./stateTransitionService');
 const attendanceService = require('./attendanceService');
+const teamsService = require('./teamsService');
 
 const IDLE_THRESHOLD = 600; // 10 minutes in seconds
 const AUTO_CHECKOUT_THRESHOLD = 7200; // 120 minutes in seconds
@@ -77,6 +78,13 @@ class ActivityService {
 
         const checkoutResult = await attendanceService.checkOut(userId, 'Auto-Checkout', { reason: 'Inactive > 60m' });
 
+        // Fetch user name for notification
+        const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
+        const userName = userResult.rows[0]?.name || 'Unknown User';
+        const currentTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+        
+        teamsService.sendAutoCheckOutAlert(userName, currentTime, 'Inactive for more than 60 minutes').catch(err => logger.error('Teams auto-checkout alert error:', err));
+
         return {
           success: false,
           error: 'AUTO_CHECKED_OUT',
@@ -86,9 +94,9 @@ class ActivityService {
       }
 
       // 2. Check for Idle Gap (Inactive > 5 minutes)
-      // If client says idle > 5 mins, we trust it.
-      if (currentGapSeconds > IDLE_THRESHOLD && attendance.current_state === 'WORKING') {
-        logger.info(`DETECTED IDLE GAP > 5m via Heartbeat. Transitioning to IDLE.`);
+      // If client says idle >= 5 mins (or whatever IDLE_THRESHOLD is), we trust it.
+      if (currentGapSeconds >= IDLE_THRESHOLD && attendance.current_state === 'WORKING') {
+        logger.info(`DETECTED IDLE GAP >= 10m via Heartbeat. Transitioning to IDLE.`);
         attendance = await stateTransitionService.applyStateTransition(attendance, 'IDLE', new Date(lastInputTs), client);
       }
 
@@ -147,7 +155,7 @@ class ActivityService {
          (user_id, attendance_record_id, timestamp, active_window_title, active_application, url,
           mouse_clicks, keyboard_strokes, is_active, idle_time_seconds)
          VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7, $8, $9)`,
-        [userId, attendance.id, active_window, active_application, url, mouse_clicks, keyboard_strokes, true, 0]
+        [userId, attendance.id, active_window, active_application, url, mouse_clicks, keyboard_strokes, activityData.is_active, idle_time_seconds]
       );
 
       // Update Redis with latest activity info
@@ -208,11 +216,19 @@ class ActivityService {
               reason: 'Inactive > 60m',
               idleSince: idleStartTime
             });
+
+            // Fetch user name for notification
+            const userResult = await pool.query('SELECT name FROM users WHERE id = $1', [userId]);
+            const userName = userResult.rows[0]?.name || 'Unknown User';
+            const currentTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+            
+            teamsService.sendAutoCheckOutAlert(userName, currentTime, 'Inactive for more than 60 minutes (Background Check)').catch(err => logger.error('Teams background auto-checkout alert error:', err));
+
             continue;
           }
 
           // If more than IDLE_THRESHOLD and currently WORKING, mark as IDLE
-          if (secondsSinceLastHeartbeat > IDLE_THRESHOLD && record.current_state === 'WORKING') {
+          if (secondsSinceLastHeartbeat >= IDLE_THRESHOLD && record.current_state === 'WORKING') {
             const idleStartTime = new Date(lastHeartbeatTs + (IDLE_THRESHOLD * 1000));
 
             logger.info(`Background check: User ${userId} idle since ${idleStartTime.toISOString()}`);
@@ -427,6 +443,14 @@ class ActivityService {
       await client.query('COMMIT');
 
       logger.info(`User ${userId} started lunch break, state transitioned to LUNCH`);
+      
+      // Fetch user name for notification
+      const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
+      const userName = userResult.rows[0]?.name || 'Unknown User';
+      const lunchStartTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      
+      teamsService.sendLunchOutAlert(userName, lunchStartTime).catch(err => logger.error('Teams lunch-out alert error:', err));
+
       return { lunchBreak: breakResult.rows[0] };
     } catch (error) {
       await client.query('ROLLBACK');
@@ -501,6 +525,19 @@ class ActivityService {
       await client.query('COMMIT');
 
       logger.info(`User ${userId} ended lunch break, state transitioned to WORKING`);
+
+      // Fetch user name for notification
+      const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
+      const userName = userResult.rows[0]?.name || 'Unknown User';
+      const lunchEndTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      
+      const durationSeconds = updatedBreak.rows[0].duration;
+      const minutes = Math.floor(durationSeconds / 60);
+      const seconds = durationSeconds % 60;
+      const durationStr = `${minutes}m ${seconds}s`;
+
+      teamsService.sendLunchInAlert(userName, lunchEndTime, durationStr).catch(err => logger.error('Teams lunch-in alert error:', err));
+
       return { lunchBreak: updatedBreak.rows[0] };
     } catch (error) {
       await client.query('ROLLBACK');

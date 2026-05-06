@@ -1,6 +1,6 @@
 {
   "name": "attendance-management-backend",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Complete Attendance Management System Backend API",
   "main": "src/index.js",
   "scripts": {
@@ -17,9 +17,10 @@
     "time-management",
     "employee-monitoring"
   ],
-  "author": "",
+  "author": "Dipesh Namdev",
   "license": "ISC",
   "dependencies": {
+    "axios": "^1.16.0",
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",

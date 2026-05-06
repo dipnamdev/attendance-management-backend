@@ -4,6 +4,7 @@ const { redisClient } = require('../config/redis');
 const { calculateDuration, formatDate } = require('../utils/helpers');
 const logger = require('../utils/logger');
 const stateTransitionService = require('./stateTransitionService');
+const teamsService = require('./teamsService');
 
 // Helper to enforce invariants and prevent runaway sums
 function clampDurations(totalWork, totalActive, totalIdle) {
@@ -141,6 +142,14 @@ class AttendanceService {
         EX: 86400,
       });
       await redisClient.set(`user:${userId}:current_state`, 'WORKING', { EX: 86400 });
+      
+      // Fetch user name for notification
+      const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
+      const userName = userResult.rows[0]?.name || 'Unknown User';
+      const checkInTime = new Date(attendance.check_in_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      
+      // Send notification asynchronously
+      teamsService.sendCheckInAlert(userName, checkInTime).catch(err => logger.error('Teams check-in alert error:', err));
 
       await client.query('COMMIT');
 
@@ -236,6 +245,21 @@ class AttendanceService {
       await redisClient.del(`user:${userId}:current_activity`);
       await redisClient.del(`user:${userId}:current_state`);
       await redisClient.del(`user:${userId}:last_activity`);
+
+      const attendanceData = updatedAttendance.rows[0];
+      const checkOutTime = new Date(attendanceData.check_out_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      
+      // Calculate work hours for notification
+      const hours = Math.floor(attendanceData.total_work_duration / 3600);
+      const minutes = Math.floor((attendanceData.total_work_duration % 3600) / 60);
+      const workHoursStr = `${hours}h ${minutes}m`;
+
+      // Fetch user name for notification
+      const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
+      const userName = userResult.rows[0]?.name || 'Unknown User';
+      
+      // Send notification asynchronously
+      teamsService.sendCheckOutAlert(userName, checkOutTime, workHoursStr).catch(err => logger.error('Teams check-out alert error:', err));
 
       await client.query('COMMIT');
 

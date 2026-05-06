@@ -167,6 +167,7 @@ class ReportService {
          ar.total_work_duration,
          ar.total_active_duration,
          ar.total_idle_duration,
+         ar.total_break_duration,
          ar.status,
          lb.break_start_time,
          lb.break_end_time,

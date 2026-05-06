@@ -14,6 +14,7 @@ const autoCheckOutUsers = require('./jobs/autoCheckOut');
 const autoCheckOutIdleUsers = require('./jobs/autoCheckOutIdle');
 const createDailyAttendance = require('./jobs/createDailyAttendance');
 const cleanupOldData = require('./jobs/cleanupOldData');
+const dailyReportJob = require('./jobs/dailyReportJob');
 
 validateConfig();
 
