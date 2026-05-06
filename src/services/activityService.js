@@ -1,6 +1,6 @@
 const pool = require('../config/database');
 const { redisClient } = require('../config/redis');
-const { formatDate } = require('../utils/helpers');
+const { formatDate, formatTime } = require('../utils/helpers');
 const logger = require('../utils/logger');
 const stateTransitionService = require('./stateTransitionService');
 const attendanceService = require('./attendanceService');
