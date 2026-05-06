@@ -82,7 +82,7 @@ class ActivityService {
         // Fetch user name for notification
         const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
         const userName = userResult.rows[0]?.name || 'Unknown User';
-        const currentTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+        const currentTime = formatTime(new Date());
         
         teamsService.sendAutoCheckOutAlert(userName, currentTime, 'Inactive for more than 60 minutes').catch(err => logger.error('Teams auto-checkout alert error:', err));
 
@@ -448,7 +448,7 @@ class ActivityService {
       // Fetch user name for notification
       const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
       const userName = userResult.rows[0]?.name || 'Unknown User';
-      const lunchStartTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      const lunchStartTime = formatTime(new Date());
       
       teamsService.sendLunchOutAlert(userName, lunchStartTime).catch(err => logger.error('Teams lunch-out alert error:', err));
 
@@ -530,7 +530,7 @@ class ActivityService {
       // Fetch user name for notification
       const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
       const userName = userResult.rows[0]?.name || 'Unknown User';
-      const lunchEndTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      const lunchEndTime = formatTime(new Date());
       
       const durationSeconds = updatedBreak.rows[0].duration;
       const minutes = Math.floor(durationSeconds / 60);

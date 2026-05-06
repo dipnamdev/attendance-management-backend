@@ -1,9 +1,9 @@
 const cron = require('node-cron');
 const reportService = require('../services/reportService');
 const teamsService = require('../services/teamsService');
-const { formatDate } = require('../utils/helpers');
+const { formatDate, formatTime } = require('../utils/helpers');
 const logger = require('../utils/logger');
-
+ 
 const formatDuration = (seconds) => {
   if (seconds === undefined || seconds === null) return '0h 0m';
   const h = Math.floor(seconds / 3600);
@@ -11,11 +11,6 @@ const formatDuration = (seconds) => {
   return `${h}h ${m}m`;
 };
 
-const formatTime = (date) => {
-  if (!date) return '-';
-  // Use a fixed locale for consistent reporting
-  return new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-};
 
 const runDailyReport = async () => {
   try {

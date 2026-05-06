@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const settingsController = require('../controllers/settingsController');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
+const { formatTime } = require('../utils/helpers');
 
 router.get('/', authenticateToken, settingsController.getSettings);
 router.put('/:key', authenticateToken, authorizeRoles('admin'), settingsController.updateSetting);
@@ -15,7 +16,7 @@ router.get('/test-teams', async (req, res) => {
   
   try {
     const teamsService = require('../services/teamsService');
-    await teamsService.sendCheckInAlert('Diagnostic Test', new Date().toLocaleTimeString());
+    await teamsService.sendCheckInAlert('Diagnostic Test', formatTime(new Date()));
     res.json({ 
       success: true, 
       message: 'Test message sent. Check Teams.',

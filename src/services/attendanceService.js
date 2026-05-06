@@ -146,7 +146,7 @@ class AttendanceService {
       // Fetch user name for notification
       const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
       const userName = userResult.rows[0]?.name || 'Unknown User';
-      const checkInTime = new Date(attendance.check_in_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      const checkInTime = formatTime(attendance.check_in_time);
       
       // Send notification asynchronously
       teamsService.sendCheckInAlert(userName, checkInTime).catch(err => logger.error('Teams check-in alert error:', err));
@@ -247,7 +247,7 @@ class AttendanceService {
       await redisClient.del(`user:${userId}:last_activity`);
 
       const attendanceData = updatedAttendance.rows[0];
-      const checkOutTime = new Date(attendanceData.check_out_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      const checkOutTime = formatTime(attendanceData.check_out_time);
       
       // Calculate work hours for notification
       const hours = Math.floor(attendanceData.total_work_duration / 3600);

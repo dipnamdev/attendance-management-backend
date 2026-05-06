@@ -32,9 +32,22 @@ const formatDate = (date) => {
   return new Date(date).toISOString().split('T')[0];
 };
 
-const isValidUUID = (uuid) => {
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  return uuidRegex.test(uuid);
+const formatTime = (date) => {
+  if (!date) return '-';
+  try {
+    return new Date(date).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+      timeZone: 'Asia/Kolkata'
+    });
+  } catch (e) {
+    return new Date(date).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
+  }
 };
 
 module.exports = {
@@ -43,5 +56,6 @@ module.exports = {
   calculateDuration,
   getClientIp,
   formatDate,
+  formatTime,
   isValidUUID,
 };
