@@ -13,6 +13,7 @@ class TeamsService {
     }
 
     try {
+      logger.info(`Attempting to send Teams notification: ${payload.summary}`);
       await axios.post(this.webhookUrl, payload, {
         headers: { 'Content-Type': 'application/json' }
       });

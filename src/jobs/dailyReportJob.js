@@ -63,8 +63,4 @@ const runDailyReport = async () => {
   }
 };
 
-// Schedule for 00:00 every day
-// '0 0 * * *' runs at midnight
-cron.schedule('0 0 * * *', runDailyReport);
-
 module.exports = { runDailyReport };
