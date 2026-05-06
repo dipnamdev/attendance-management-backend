@@ -7,7 +7,7 @@ const attendanceService = require('./attendanceService');
 const teamsService = require('./teamsService');
 
 const IDLE_THRESHOLD = 600; // 10 minutes in seconds
-const AUTO_CHECKOUT_THRESHOLD = 7200; // 120 minutes in seconds
+const AUTO_CHECKOUT_THRESHOLD = 3600; // 60 minutes in seconds
 
 class ActivityService {
   async processHeartbeat(userId, activityData) {
@@ -66,13 +66,14 @@ class ActivityService {
         // when they shouldn't. But the client logic is solid now.
       }
 
-      // Check for Auto-Checkout (Inactive > 60 minutes)
+      // Check for Auto-Checkout (Inactive > threshold)
       const currentGapSeconds = (now - lastInputTs) / 1000;
+      const checkoutLimitMinutes = Math.floor(AUTO_CHECKOUT_THRESHOLD / 60);
 
       logger.info(`Gap analysis: now=${new Date(now).toISOString()}, lastInput=${new Date(lastInputTs).toISOString()}, gap=${currentGapSeconds}s, current_state=${attendance.current_state}`);
 
-      if (currentGapSeconds > 3600) {
-        logger.info(`User ${userId} inactive for ${currentGapSeconds}s (> 60m). Auto-checking out.`);
+      if (currentGapSeconds > AUTO_CHECKOUT_THRESHOLD) {
+        logger.info(`User ${userId} inactive for ${currentGapSeconds}s (> ${checkoutLimitMinutes}m). Auto-checking out.`);
         await client.query('ROLLBACK');
         client.release();
 

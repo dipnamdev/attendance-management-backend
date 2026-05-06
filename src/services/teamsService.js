@@ -18,7 +18,11 @@ class TeamsService {
       });
       logger.info('Teams notification sent successfully');
     } catch (error) {
-      logger.error('Failed to send Teams notification:', error.message);
+      if (error.response) {
+        logger.error(`Failed to send Teams notification. Status: ${error.response.status}`, error.response.data);
+      } else {
+        logger.error('Failed to send Teams notification:', error.message);
+      }
     }
   }
 

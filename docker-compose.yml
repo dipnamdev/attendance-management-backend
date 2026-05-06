@@ -20,6 +20,7 @@ services:
       SESSION_SECRET: ${SESSION_SECRET}
       UPLOAD_DIR: /usr/src/app/uploads
       MAX_FILE_SIZE: ${MAX_FILE_SIZE}
+      TEAMS_WEBHOOK_URL: ${TEAMS_WEBHOOK_URL}
     depends_on:
       postgres:
         condition: service_healthy
