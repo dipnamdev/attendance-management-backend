@@ -125,7 +125,18 @@ async function autoCheckOutUsers(targetDate) {
                 const totalActive = attendance.active_seconds || 0;
                 const totalIdle = attendance.idle_seconds || 0;
                 const totalBreak = attendance.lunch_seconds || 0;
-                const totalWork = totalActive + totalIdle;
+                const rawTotalWork = totalActive + totalIdle;
+
+                // Safety cap: total work can never exceed wall-clock time (check-in → end-of-day).
+                const wallClockSeconds = Math.max(0, Math.floor((recordEndOfDay - new Date(attendance.check_in_time)) / 1000));
+                const totalWork = Math.min(rawTotalWork, wallClockSeconds);
+
+                if (rawTotalWork > wallClockSeconds) {
+                    logger.warn(
+                        `[AUTO-CHECKOUT CLAMP] record=${record.id} rawWork=${rawTotalWork}s exceeds wallClock=${wallClockSeconds}s. ` +
+                        `Clamped. active=${totalActive}s, idle=${totalIdle}s, lunch=${totalBreak}s`
+                    );
+                }
 
                 // 4. Update attendance record with final totals
                 await client.query(`

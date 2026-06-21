@@ -219,11 +219,19 @@ class AttendanceService {
       const totalBreak = attendance.lunch_seconds || 0;
 
       // Calculate total work time: active + idle (excludes lunch)
-      const totalWork = totalActive + totalIdle;
+      const rawTotalWork = totalActive + totalIdle;
 
-      logger.info(
-        `State-based duration for user ${userId}: work=${totalWork}s, active=${totalActive}s, idle=${totalIdle}s, lunch=${totalBreak}s`
-      );
+      // Safety cap: total work can never exceed wall-clock time (check-in to now).
+      // If state counters drifted due to a race condition, this prevents impossible values.
+      const wallClockSeconds = Math.max(0, Math.floor((new Date() - new Date(attendance.check_in_time)) / 1000));
+      const totalWork = Math.min(rawTotalWork, wallClockSeconds);
+
+      if (rawTotalWork > wallClockSeconds) {
+        logger.warn(
+          `[CHECKOUT CLAMP] user=${userId} rawWork=${rawTotalWork}s exceeds wallClock=${wallClockSeconds}s. ` +
+          `Clamped to wallClock. active=${totalActive}s, idle=${totalIdle}s, lunch=${totalBreak}s`
+        );
+      }
 
       // Update legacy fields for backward compatibility
       const updatedAttendance = await client.query(

@@ -9,6 +9,26 @@ const teamsService = require('./teamsService');
 const IDLE_THRESHOLD = 600; // 10 minutes in seconds
 const AUTO_CHECKOUT_THRESHOLD = 3600; // 60 minutes in seconds
 
+function isMeetingWindow(title, app) {
+  if (!title) return false;
+  
+  const titleLower = title.toLowerCase();
+  const appLower = (app || '').toLowerCase();
+  
+  // Specific user-provided keywords
+  if (titleLower.includes('meet')) return true;
+  if (titleLower.includes('google meet')) return true;
+  if (titleLower.includes('meeting in') && titleLower.includes('microsoft teams')) return true;
+  
+  // General fallback for popular meeting apps
+  if (appLower.includes('teams') && (titleLower.includes('meeting') || titleLower.includes('call'))) return true;
+  if (appLower.includes('zoom')) return true;
+  if (titleLower.includes('zoom meeting') || titleLower.includes('zoom call')) return true;
+  if (titleLower.includes('meet.google.com')) return true;
+  
+  return false;
+}
+
 class ActivityService {
   async processHeartbeat(userId, activityData) {
     const {
@@ -28,8 +48,10 @@ class ActivityService {
       await client.query('BEGIN');
 
       const today = formatDate(new Date());
+      // FOR UPDATE prevents a concurrent background job (checkForIdleUsers) from
+      // reading the same stale row and double-incrementing active_seconds/idle_seconds.
       const attendanceResult = await client.query(
-        'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2',
+        'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2 FOR UPDATE',
         [userId, today]
       );
 
@@ -50,8 +72,13 @@ class ActivityService {
 
       let lastInputTs = now; // Initialize lastInputTs
 
-      // REVISED LOGIC: Trust the client's idle_time_seconds
-      if (idle_time_seconds > 0) {
+      const isMeeting = isMeetingWindow(active_window, active_application);
+
+      // REVISED LOGIC: Trust the client's idle_time_seconds, UNLESS they are in a meeting
+      if (isMeeting) {
+        logger.info(`User ${userId} detected in meeting: window="${active_window}", app="${active_application}". Marking as active.`);
+        lastInputTs = now;
+      } else if (idle_time_seconds > 0) {
         lastInputTs = now - (idle_time_seconds * 1000);
       } else if (cachedActivity) {
         // Fallback or verify with cache
@@ -94,11 +121,32 @@ class ActivityService {
         };
       }
 
-      // 2. Check for Idle Gap (Inactive > 5 minutes)
-      // If client says idle >= 5 mins (or whatever IDLE_THRESHOLD is), we trust it.
+      // 2. Check for Idle Gap (Inactive >= IDLE_THRESHOLD)
+      // Trust the client's idle_time_seconds and transition WORKING→IDLE at the real idle-start moment.
+      // IMPORTANT: We must also update activity_logs here (not just in Block 3 below).
+      // If this fires AND the user also sent clicks (hasInput=true, handled below), Block 3 will
+      // immediately fire a second IDLE→WORKING transition in the same request.
+      // Without closing the active log here, Block 3's log UPDATE would close the original
+      // active log at T_hb (too late), folding the idle gap into it — causing
+      // activity_log to record the gap as ACTIVE while the state counter correctly records it as IDLE.
+      // That mismatch produces the observed "active_diff ≈ -idle_diff" pattern in production.
       if (currentGapSeconds >= IDLE_THRESHOLD && attendance.current_state === 'WORKING') {
-        logger.info(`DETECTED IDLE GAP >= 10m via Heartbeat. Transitioning to IDLE.`);
+        logger.info(`DETECTED IDLE GAP >= 10m via Heartbeat. Transitioning to IDLE at ${new Date(lastInputTs).toISOString()}`);
         attendance = await stateTransitionService.applyStateTransition(attendance, 'IDLE', new Date(lastInputTs), client);
+
+        // Close the open active log at the real idle-start time, then insert the idle log.
+        // This keeps activity_logs in sync with the state counter transition we just applied.
+        await client.query(
+          `UPDATE activity_logs
+           SET end_time = $3, duration = EXTRACT(EPOCH FROM ($3 - start_time))::INTEGER
+           WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL`,
+          [userId, attendance.id, new Date(lastInputTs)]
+        );
+        await client.query(
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time)
+           VALUES ($1, $2, 'idle', $3)`,
+          [userId, attendance.id, new Date(lastInputTs)]
+        );
       }
 
       const { is_active } = activityData;
@@ -238,9 +286,10 @@ class ActivityService {
             try {
               await client.query('BEGIN');
 
-              // Fetch fresh attendance record
+              // Fetch fresh attendance record with row lock so concurrent heartbeats
+              // cannot simultaneously apply a state transition on the same row.
               const freshAttendance = await client.query(
-                'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2',
+                'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2 FOR UPDATE',
                 [userId, today]
               );
 

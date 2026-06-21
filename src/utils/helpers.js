@@ -29,7 +29,13 @@ const getClientIp = (req) => {
 };
 
 const formatDate = (date) => {
-  return new Date(date).toISOString().split('T')[0];
+  if (!date) return null;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date(date));
 };
 
 const formatTime = (date) => {
