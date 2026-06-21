@@ -2,7 +2,7 @@ const pool = require('../config/database');
 const logger = require('../utils/logger');
 const { redisClient } = require('../config/redis');
 
-const MAX_IDLE_DURATION = 30 * 60; // 30 minutes in seconds
+const MAX_IDLE_DURATION = 60 * 60; // 60 minutes in seconds
 
 async function autoCheckOutIdleUsers() {
     const client = await pool.connect();
@@ -10,7 +10,7 @@ async function autoCheckOutIdleUsers() {
     try {
         logger.info('Running auto-checkout for excessive idle users...');
 
-        // Find all users who are currently IDLE for more than 30 minutes
+        // Find all users who are currently IDLE for more than 60 minutes
         const excessiveIdleUsers = await client.query(`
       SELECT 
         id,
@@ -29,7 +29,7 @@ async function autoCheckOutIdleUsers() {
             return { checkedOut: 0 };
         }
 
-        logger.info(`Found ${excessiveIdleUsers.rows.length} users idle > 30 mins. Auto-checking out...`);
+        logger.info(`Found ${excessiveIdleUsers.rows.length} users idle > 60 mins. Auto-checking out...`);
 
         let checkedOutCount = 0;
 
@@ -37,8 +37,8 @@ async function autoCheckOutIdleUsers() {
             await client.query('BEGIN');
 
             try {
-                // Calculate the check-out time as exactly 30 mins after they went idle
-                // This caps the credited idle time at 30 mins
+                // Calculate the check-out time as exactly 60 mins after they went idle
+                // This caps the credited idle time at 60 mins
                 const checkOutTime = new Date(new Date(record.last_state_change_at).getTime() + (MAX_IDLE_DURATION * 1000));
 
                 // Fetch current attendance record full data
@@ -101,7 +101,7 @@ async function autoCheckOutIdleUsers() {
                 await client.query('COMMIT');
 
                 const userIdDisplay = record.user_id ? String(record.user_id).substring(0, 8) : 'unknown';
-                logger.info(`Auto-checked out idle user ${userIdDisplay}. (Idle > 30m, capped at 30m)`);
+                logger.info(`Auto-checked out idle user ${userIdDisplay}. (Idle > 60m, capped at 60m)`);
                 checkedOutCount++;
 
             } catch (error) {
