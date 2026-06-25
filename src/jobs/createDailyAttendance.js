@@ -16,8 +16,7 @@ async function createDailyAttendance(targetDate) {
     const sql = `
       INSERT INTO attendance_records (user_id, date, created_at)
       SELECT u.id, $1::date, NOW()
-      FROM users u
-      WHERE (u.is_active IS NULL OR u.is_active = true)
+      WHERE u.status = 'active'
         AND NOT EXISTS (
           SELECT 1 FROM attendance_records ar WHERE ar.user_id = u.id AND ar.date::date = $1::date
         )
