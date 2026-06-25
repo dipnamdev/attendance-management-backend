@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS attendance_records (
     check_in_location JSONB,
     check_out_location JSONB,
     notes TEXT,
+    untracked_seconds INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT unique_user_date UNIQUE(user_id, date)
@@ -56,7 +57,7 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     attendance_record_id UUID REFERENCES attendance_records(id) ON DELETE CASCADE,
-    activity_type VARCHAR(20) NOT NULL CHECK (activity_type IN ('active', 'idle', 'lunch_break', 'meeting')),
+    activity_type VARCHAR(20) NOT NULL CHECK (activity_type IN ('active', 'idle', 'lunch_break', 'meeting', 'untracked')),
     start_time TIMESTAMP NOT NULL,
     end_time TIMESTAMP,
     duration INTEGER,
@@ -111,6 +112,17 @@ CREATE TABLE IF NOT EXISTS lunch_breaks (
     end_location JSONB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create attendance_notes table if it doesn't exist
+CREATE TABLE IF NOT EXISTS attendance_notes (
+    id SERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    date DATE NOT NULL,
+    note_text TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_user_date_note UNIQUE (user_id, date)
 );
 
 -- Create productivity_summary table if it doesn't exist
@@ -174,6 +186,14 @@ CREATE INDEX IF NOT EXISTS idx_productivity_user_id ON productivity_summary(user
 CREATE INDEX IF NOT EXISTS idx_productivity_date ON productivity_summary(date);
 
 CREATE INDEX IF NOT EXISTS idx_settings_key ON system_settings(setting_key);
+
+CREATE INDEX IF NOT EXISTS idx_attendance_notes_user_id ON attendance_notes(user_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_notes_date ON attendance_notes(date);
+
+-- Alter queries for updating existing database installations
+ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS untracked_seconds INTEGER DEFAULT 0;
+ALTER TABLE activity_logs DROP CONSTRAINT IF EXISTS activity_logs_activity_type_check;
+ALTER TABLE activity_logs ADD CONSTRAINT activity_logs_activity_type_check CHECK (activity_type IN ('active', 'idle', 'lunch_break', 'meeting', 'untracked'));
 `;
 
 async function runMigration() {

@@ -25,9 +25,9 @@ const checkOut = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const ipAddress = getClientIp(req);
-    const { location } = req.body;
+    const { location, timestamp } = req.body;
 
-    const result = await attendanceService.checkOut(userId, ipAddress, location);
+    const result = await attendanceService.checkOut(userId, ipAddress, location, timestamp ? new Date(timestamp) : null);
 
     if (result.error) {
       return errorResponse(res, result.error, result.message, 400);
@@ -113,6 +113,40 @@ const updateNotes = async (req, res, next) => {
   }
 };
 
+const saveDailyNote = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const { date, note } = req.body;
+
+    if (!date || note === undefined) {
+      return errorResponse(res, 'BAD_REQUEST', 'Date and note content are required', 400);
+    }
+
+    const noteRecord = await attendanceService.saveDailyNote(userId, date, note);
+    return successResponse(res, noteRecord, 'Daily note saved successfully');
+  } catch (error) {
+    logger.error('Save daily note controller error:', error);
+    next(error);
+  }
+};
+
+const getDailyNote = async (req, res, next) => {
+  try {
+    const { date, user_id } = req.query;
+    const userId = req.user.role === 'admin' && user_id ? user_id : req.user.id;
+
+    if (!date) {
+      return errorResponse(res, 'BAD_REQUEST', 'Date parameter is required', 400);
+    }
+
+    const noteRecord = await attendanceService.getDailyNote(userId, date);
+    return successResponse(res, noteRecord);
+  } catch (error) {
+    logger.error('Get daily note controller error:', error);
+    next(error);
+  }
+};
+
 module.exports = {
   checkIn,
   checkOut,
@@ -120,4 +154,6 @@ module.exports = {
   getToday,
   getHistory,
   updateNotes,
+  saveDailyNote,
+  getDailyNote,
 };

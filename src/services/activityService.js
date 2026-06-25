@@ -47,15 +47,16 @@ class ActivityService {
     try {
       await client.query('BEGIN');
 
-      // Split/close any open previous day shifts first
-      await attendanceService.checkAndSplitShift(userId, client);
+      const referenceDate = activityData.timestamp ? new Date(activityData.timestamp) : new Date();
+      // Split/close any open previous day shifts first relative to the heartbeat date
+      await attendanceService.checkAndSplitShift(userId, client, referenceDate);
 
-      const today = formatDate(new Date());
+      const heartbeatDate = formatDate(referenceDate);
       // FOR UPDATE prevents a concurrent background job (checkForIdleUsers) from
       // reading the same stale row and double-incrementing active_seconds/idle_seconds.
       const attendanceResult = await client.query(
         'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2 FOR UPDATE',
-        [userId, today]
+        [userId, heartbeatDate]
       );
 
       if (attendanceResult.rows.length === 0) {
@@ -70,7 +71,7 @@ class ActivityService {
         return { error: 'ALREADY_CHECKED_OUT', message: 'You have already checked out' };
       }
 
-      const now = Date.now();
+      const now = activityData.timestamp ? new Date(activityData.timestamp).getTime() : Date.now();
       const cachedActivity = await redisClient.get(`user:${userId}:last_activity`);
 
       let lastInputTs = now; // Initialize lastInputTs
@@ -214,8 +215,8 @@ class ActivityService {
         `INSERT INTO user_activity_tracking
          (user_id, attendance_record_id, timestamp, active_window_title, active_application, url,
           mouse_clicks, keyboard_strokes, is_active, idle_time_seconds)
-         VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7, $8, $9)`,
-        [userId, attendance.id, active_window, active_application, url, mouse_clicks, keyboard_strokes, activityData.is_active, idle_time_seconds]
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [userId, attendance.id, new Date(now), active_window, active_application, url, mouse_clicks, keyboard_strokes, activityData.is_active, idle_time_seconds]
       );
 
       // Update Redis with latest activity info

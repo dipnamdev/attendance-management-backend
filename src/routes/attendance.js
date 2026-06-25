@@ -10,5 +10,7 @@ router.get('/status', authenticateToken, attendanceController.getStatus);
 router.get('/today', authenticateToken, attendanceController.getToday);
 router.get('/history', authenticateToken, attendanceController.getHistory);
 router.put('/:id/notes', authenticateToken, attendanceController.updateNotes);
+router.post('/notes', authenticateToken, attendanceController.saveDailyNote);
+router.get('/notes', authenticateToken, attendanceController.getDailyNote);
 
 module.exports = router;

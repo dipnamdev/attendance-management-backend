@@ -69,15 +69,18 @@ class AttendanceService {
           const checkOutMs = new Date(existing.check_out_time).getTime();
           const gapSeconds = Math.max(0, Math.floor((nowMs - checkOutMs) / 1000));
 
-          // Log this gap as 'idle' in activity_logs to keep reports consistent
+          // Log this gap as 'untracked' in activity_logs to keep reports consistent
           if (gapSeconds > 0) {
             await client.query(
               `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time, end_time, duration) 
-               VALUES ($1, $2, 'idle', $3, NOW(), $4)`,
+               VALUES ($1, $2, 'untracked', $3, NOW(), $4)`,
               [userId, existing.id, existing.check_out_time, gapSeconds]
             );
-            logger.info(`Logged gap of ${gapSeconds}s as idle time for user ${userId} during re-check-in`);
+            logger.info(`Logged gap of ${gapSeconds}s as untracked time for user ${userId} during re-check-in`);
           }
+
+          const currentUntracked = existing.untracked_seconds || 0;
+          const newUntracked = currentUntracked + gapSeconds;
 
           const updateResult = await client.query(
             `UPDATE attendance_records 
@@ -90,13 +93,14 @@ class AttendanceService {
                  total_break_duration = NULL,
                  current_state = NULL,
                  last_state_change_at = NULL,
+                 untracked_seconds = $2,
                  updated_at = NOW()
              WHERE id = $1
              RETURNING *`,
-            [existing.id]
+            [existing.id, newUntracked]
           );
           attendance = updateResult.rows[0];
-          logger.info(`User ${userId} re-checked in. Gap of ${gapSeconds}s logged in activity_logs.`);
+          logger.info(`User ${userId} re-checked in. Gap of ${gapSeconds}s logged in activity_logs as untracked.`);
         }
         // If an attendance row exists but has no check_in_time (pre-created), update it to set check-in
         if (!existing.check_in_time && !existing.check_out_time) {
@@ -164,14 +168,15 @@ class AttendanceService {
     }
   }
 
-  async checkOut(userId, ipAddress, location = null) {
+  async checkOut(userId, ipAddress, location = null, checkoutTime = null) {
     const client = await pool.connect();
+    const finalCheckoutTime = checkoutTime ? new Date(checkoutTime) : new Date();
     try {
       await client.query('BEGIN');
 
-      await this.checkAndSplitShift(userId, client);
+      await this.checkAndSplitShift(userId, client, finalCheckoutTime);
 
-      const today = formatDate(new Date());
+      const today = formatDate(finalCheckoutTime);
 
       const attendanceResult = await client.query(
         'SELECT * FROM attendance_records WHERE user_id = $1 AND date::date = $2::date',
@@ -191,15 +196,15 @@ class AttendanceService {
       }
 
       // Finalize current state and accumulate time
-      attendance = await stateTransitionService.finalizeState(attendance, new Date(), client);
+      attendance = await stateTransitionService.finalizeState(attendance, finalCheckoutTime, client);
 
       // Close all open activity logs for audit trail
       const closedActivities = await client.query(
         `UPDATE activity_logs 
-         SET end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER
+         SET end_time = $3, duration = EXTRACT(EPOCH FROM ($3 - start_time))::INTEGER
          WHERE user_id = $1 AND attendance_record_id = $2 AND end_time IS NULL
          RETURNING id, activity_type, duration`,
-        [userId, attendance.id]
+        [userId, attendance.id, finalCheckoutTime]
       );
 
       logger.info(`Closed ${closedActivities.rows.length} open activities for user ${userId}`);
@@ -207,10 +212,10 @@ class AttendanceService {
       // Close all open lunch breaks
       const closedBreaks = await client.query(
         `UPDATE lunch_breaks 
-         SET break_end_time = NOW(), duration = EXTRACT(EPOCH FROM (NOW() - break_start_time))::INTEGER
+         SET break_end_time = $3, duration = EXTRACT(EPOCH FROM ($3 - break_start_time))::INTEGER
          WHERE user_id = $1 AND attendance_record_id = $2 AND break_end_time IS NULL
          RETURNING id, duration`,
-        [userId, attendance.id]
+        [userId, attendance.id, finalCheckoutTime]
       );
 
       logger.info(`Closed ${closedBreaks.rows.length} open lunch breaks for user ${userId}`);
@@ -225,7 +230,7 @@ class AttendanceService {
 
       // Safety cap: total work can never exceed wall-clock time (check-in to now).
       // If state counters drifted due to a race condition, this prevents impossible values.
-      const wallClockSeconds = Math.max(0, Math.floor((new Date() - new Date(attendance.check_in_time)) / 1000));
+      const wallClockSeconds = Math.max(0, Math.floor((finalCheckoutTime - new Date(attendance.check_in_time)) / 1000));
       const totalWork = Math.min(rawTotalWork, wallClockSeconds);
 
       if (rawTotalWork > wallClockSeconds) {
@@ -238,7 +243,7 @@ class AttendanceService {
       // Update legacy fields for backward compatibility
       const updatedAttendance = await client.query(
         `UPDATE attendance_records 
-         SET check_out_time = NOW(), 
+         SET check_out_time = $8, 
              check_out_ip = $1, 
              check_out_location = $2,
              total_work_duration = $3,
@@ -248,7 +253,7 @@ class AttendanceService {
              updated_at = NOW()
          WHERE id = $7 
          RETURNING *`,
-        [ipAddress, location ? JSON.stringify(location) : null, totalWork, totalActive, totalIdle, totalBreak, attendance.id]
+        [ipAddress, location ? JSON.stringify(location) : null, totalWork, totalActive, totalIdle, totalBreak, attendance.id, finalCheckoutTime]
       );
 
       await redisClient.del(`user:${userId}:attendance`);
@@ -308,6 +313,17 @@ class AttendanceService {
 
     // If already checked out, return stored values
     if (attendance.check_out_time) {
+      const logsResult = await pool.query(
+        `SELECT id, activity_type, start_time, end_time, duration 
+         FROM activity_logs 
+         WHERE attendance_record_id = $1 
+         ORDER BY start_time ASC`,
+        [attendance.id]
+      );
+      const noteResult = await pool.query(
+        'SELECT note_text FROM attendance_notes WHERE user_id = $1 AND date::date = $2::date',
+        [userId, today]
+      );
       return {
         ...attendance,
         total_time: attendance.total_work_duration || 0,
@@ -315,7 +331,9 @@ class AttendanceService {
         idle_time: attendance.total_idle_duration || 0,
         break_time: attendance.total_break_duration || 0,
         tracked_time: (attendance.total_active_duration || 0) + (attendance.total_idle_duration || 0),
-        untracked_time: 0
+        untracked_time: attendance.untracked_seconds || 0,
+        activity_logs: logsResult.rows,
+        daily_note: noteResult.rows[0]?.note_text || null
       };
     }
 
@@ -387,6 +405,19 @@ class AttendanceService {
     const totalWork = totalActive + totalIdle;
     const trackedTime = totalActive + totalIdle;
 
+    const logsResult = await pool.query(
+      `SELECT id, activity_type, start_time, end_time, duration 
+       FROM activity_logs 
+       WHERE attendance_record_id = $1 
+       ORDER BY start_time ASC`,
+      [attendance.id]
+    );
+
+    const noteResult = await pool.query(
+      'SELECT note_text FROM attendance_notes WHERE user_id = $1 AND date::date = $2::date',
+      [userId, today]
+    );
+
     return {
       ...attendance,
       total_time: totalWork > 0 ? totalWork : 0,
@@ -394,8 +425,10 @@ class AttendanceService {
       idle_time: totalIdle,
       break_time: totalBreak,
       tracked_time: trackedTime,
-      untracked_time: 0,
-      current_state: attendance.current_state
+      untracked_time: attendance.untracked_seconds || 0,
+      current_state: attendance.current_state,
+      activity_logs: logsResult.rows,
+      daily_note: noteResult.rows[0]?.note_text || null
     };
   }
 
@@ -416,9 +449,25 @@ class AttendanceService {
 
     // For each record, if it's not checked out yet, calculate real-time durations
     const enrichedRecords = await Promise.all(result.rows.map(async (record) => {
-      // If already checked out, return as-is (durations are already stored)
+      // If already checked out, return stored values and logs
       if (record.check_out_time) {
-        return record;
+        const logsResult = await pool.query(
+          `SELECT id, activity_type, start_time, end_time, duration 
+           FROM activity_logs 
+           WHERE attendance_record_id = $1 
+           ORDER BY start_time ASC`,
+          [record.id]
+        );
+        const noteResult = await pool.query(
+          'SELECT note_text FROM attendance_notes WHERE user_id = $1 AND date::date = $2::date',
+          [record.user_id, record.date]
+        );
+        return {
+          ...record,
+          untracked_time: record.untracked_seconds || 0,
+          activity_logs: logsResult.rows,
+          daily_note: noteResult.rows[0]?.note_text || null
+        };
       }
 
       /**
@@ -484,6 +533,17 @@ class AttendanceService {
         const totalWork = totalActive + totalIdle;
         const trackedTime = totalActive + totalIdle;
 
+        const logsResult = await pool.query(
+          `SELECT id, activity_type, start_time, end_time, duration 
+           FROM activity_logs 
+           WHERE attendance_record_id = $1 
+           ORDER BY start_time ASC`,
+          [record.id]
+        );
+        const noteResult = await pool.query(
+          'SELECT note_text FROM attendance_notes WHERE user_id = $1 AND date::date = $2::date',
+          [record.user_id, record.date]
+        );
         return {
           ...record,
           total_work_duration: totalWork > 0 ? totalWork : 0,
@@ -491,7 +551,9 @@ class AttendanceService {
           total_idle_duration: totalIdle,
           total_break_duration: totalBreak,
           tracked_time: trackedTime,
-          untracked_time: 0
+          untracked_time: record.untracked_seconds || 0,
+          activity_logs: logsResult.rows,
+          daily_note: noteResult.rows[0]?.note_text || null
         };
       }
 
@@ -609,6 +671,17 @@ class AttendanceService {
       const trackedTime = finalActive + finalIdle;
       // Untracked time is when the app was closed
       const untrackedTime = Math.max(0, finalWork - trackedTime);
+      const logsResult = await pool.query(
+        `SELECT id, activity_type, start_time, end_time, duration 
+         FROM activity_logs 
+         WHERE attendance_record_id = $1 
+         ORDER BY start_time ASC`,
+        [record.id]
+      );
+      const noteResult = await pool.query(
+        'SELECT note_text FROM attendance_notes WHERE user_id = $1 AND date::date = $2::date',
+        [record.user_id, record.date]
+      );
 
       // Return record with calculated real-time durations
       return {
@@ -618,7 +691,9 @@ class AttendanceService {
         total_idle_duration: finalIdle,
         total_break_duration: totalBreak,
         tracked_time: trackedTime,
-        untracked_time: untrackedTime
+        untracked_time: untrackedTime,
+        activity_logs: logsResult.rows,
+        daily_note: noteResult.rows[0]?.note_text || null
       };
     }));
 
@@ -636,8 +711,8 @@ class AttendanceService {
     return result.rows[0] || null;
   }
 
-  async checkAndSplitShift(userId, client) {
-    const todayStr = formatDate(new Date());
+  async checkAndSplitShift(userId, client, referenceDate = null) {
+    const todayStr = formatDate(referenceDate || new Date());
 
     // Find any open attendance record from a previous date
     const openRecordsResult = await client.query(
@@ -779,6 +854,26 @@ class AttendanceService {
         logger.error(`Error updating redis in split:`, redisErr);
       }
     }
+  }
+
+  async saveDailyNote(userId, date, noteText) {
+    const query = `
+      INSERT INTO attendance_notes (user_id, date, note_text, updated_at)
+      VALUES ($1, $2::date, $3, NOW())
+      ON CONFLICT (user_id, date)
+      DO UPDATE SET note_text = $3, updated_at = NOW()
+      RETURNING *
+    `;
+    const result = await pool.query(query, [userId, date, noteText]);
+    return result.rows[0];
+  }
+
+  async getDailyNote(userId, date) {
+    const result = await pool.query(
+      'SELECT * FROM attendance_notes WHERE user_id = $1 AND date::date = $2::date',
+      [userId, date]
+    );
+    return result.rows[0] || null;
   }
 }
 

@@ -69,6 +69,7 @@ class ReportService {
          SUM(total_active_duration) as total_active,
          SUM(total_idle_duration) as total_idle,
          SUM(total_break_duration) as total_break,
+         SUM(untracked_seconds) as total_untracked,
          AVG(total_active_duration) as avg_active
        FROM attendance_records
        WHERE user_id = $1 AND date::date >= $2::date AND date::date <= $3::date`,
@@ -105,6 +106,7 @@ class ReportService {
          SUM(total_active_duration) as total_active,
          SUM(total_idle_duration) as total_idle,
          SUM(total_break_duration) as total_break,
+         SUM(untracked_seconds) as total_untracked,
          AVG(total_active_duration) as avg_active,
          COUNT(CASE WHEN status = 'present' THEN 1 END) as present_days,
          COUNT(CASE WHEN status = 'absent' THEN 1 END) as absent_days
@@ -168,6 +170,7 @@ class ReportService {
          ar.total_active_duration,
          ar.total_idle_duration,
          ar.total_break_duration,
+         ar.untracked_seconds,
          ar.status,
          lb.break_start_time,
          lb.break_end_time,
