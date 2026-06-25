@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS attendance_records (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     date DATE NOT NULL,
-    check_in_time TIMESTAMP NOT NULL,
+    check_in_time TIMESTAMP,
     check_out_time TIMESTAMP,
     total_work_duration INTEGER DEFAULT 0,
     total_active_duration INTEGER DEFAULT 0,
@@ -194,6 +194,7 @@ CREATE INDEX IF NOT EXISTS idx_attendance_notes_date ON attendance_notes(date);
 ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS untracked_seconds INTEGER DEFAULT 0;
 ALTER TABLE activity_logs DROP CONSTRAINT IF EXISTS activity_logs_activity_type_check;
 ALTER TABLE activity_logs ADD CONSTRAINT activity_logs_activity_type_check CHECK (activity_type IN ('active', 'idle', 'lunch_break', 'meeting', 'untracked'));
+ALTER TABLE attendance_records ALTER COLUMN check_in_time DROP NOT NULL;
 `;
 
 async function runMigration() {
