@@ -5,6 +5,7 @@ const fs = require('fs').promises;
 const pool = require('../config/database');
 const { successResponse, errorResponse, formatDate } = require('../utils/helpers');
 const logger = require('../utils/logger');
+const attendanceService = require('../services/attendanceService');
 
 const storage = multer.diskStorage({
   destination: async (req, file, cb) => {
@@ -62,6 +63,10 @@ const uploadScreenshot = async (req, res, next) => {
       await client.query('BEGIN');
 
       const userId = req.user.id;
+
+      // Split/close any open previous day shifts first
+      await attendanceService.checkAndSplitShift(userId, client);
+
       const today = formatDate(new Date());
 
       const attendanceResult = await client.query(

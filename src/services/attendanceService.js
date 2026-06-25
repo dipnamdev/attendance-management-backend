@@ -34,6 +34,8 @@ class AttendanceService {
     try {
       await client.query('BEGIN');
 
+      await this.checkAndSplitShift(userId, client);
+
       const today = formatDate(new Date());
 
       const existingAttendance = await client.query(
@@ -86,17 +88,15 @@ class AttendanceService {
                  total_active_duration = NULL,
                  total_idle_duration = NULL,
                  total_break_duration = NULL,
-                 -- Add gap to existing idle_seconds, PRESERVE other counters
-                 idle_seconds = COALESCE(idle_seconds, 0) + $2,
                  current_state = NULL,
                  last_state_change_at = NULL,
                  updated_at = NOW()
              WHERE id = $1
              RETURNING *`,
-            [existing.id, gapSeconds]
+            [existing.id]
           );
           attendance = updateResult.rows[0];
-          logger.info(`User ${userId} re-checked in. Gap of ${gapSeconds}s added to idle.`);
+          logger.info(`User ${userId} re-checked in. Gap of ${gapSeconds}s logged in activity_logs.`);
         }
         // If an attendance row exists but has no check_in_time (pre-created), update it to set check-in
         if (!existing.check_in_time && !existing.check_out_time) {
@@ -168,6 +168,8 @@ class AttendanceService {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      await this.checkAndSplitShift(userId, client);
 
       const today = formatDate(new Date());
 
@@ -283,6 +285,18 @@ class AttendanceService {
   }
 
   async getTodayAttendance(userId) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await this.checkAndSplitShift(userId, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      logger.error('Error splitting shift in getTodayAttendance:', err);
+    } finally {
+      client.release();
+    }
+
     const today = formatDate(new Date());
     const result = await pool.query(
       'SELECT * FROM attendance_records WHERE user_id = $1 AND date::date = $2::date',
@@ -620,6 +634,151 @@ class AttendanceService {
     const result = await pool.query(query, params);
 
     return result.rows[0] || null;
+  }
+
+  async checkAndSplitShift(userId, client) {
+    const todayStr = formatDate(new Date());
+
+    // Find any open attendance record from a previous date
+    const openRecordsResult = await client.query(
+      `SELECT * FROM attendance_records 
+       WHERE user_id = $1 AND date < $2::date AND check_out_time IS NULL 
+       ORDER BY date ASC`,
+      [userId, todayStr]
+    );
+
+    if (openRecordsResult.rows.length === 0) {
+      return;
+    }
+
+    logger.info(`Found ${openRecordsResult.rows.length} open previous records for user ${userId}. Processing split...`);
+
+    for (let record of openRecordsResult.rows) {
+      const prevDateStr = formatDate(record.date); // e.g. '2026-06-22'
+      const endOfPrevDay = new Date(`${prevDateStr}T23:59:59.999+05:30`);
+      const startOfNextDay = new Date(endOfPrevDay.getTime() + 1); // exactly 00:00:00.000 of next day
+      const nextDateStr = formatDate(startOfNextDay); // e.g. '2026-06-23'
+
+      logger.info(`Splitting attendance record ${record.id} for user ${userId} at midnight crossing ${prevDateStr} -> ${nextDateStr}`);
+
+      // Keep track of the user's state prior to split
+      const prevState = record.current_state || 'WORKING';
+
+      // 1. Finalize the state of the previous record at the end of that day
+      record = await stateTransitionService.finalizeState(record, endOfPrevDay, client);
+
+      // Close open activity logs at the end of that day
+      await client.query(
+        `UPDATE activity_logs 
+         SET end_time = $1, duration = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
+         WHERE attendance_record_id = $2 AND end_time IS NULL`,
+        [endOfPrevDay, record.id]
+      );
+
+      // Close open lunch breaks at the end of that day
+      await client.query(
+        `UPDATE lunch_breaks 
+         SET break_end_time = $1, duration = EXTRACT(EPOCH FROM ($1 - break_start_time))::INTEGER
+         WHERE attendance_record_id = $2 AND break_end_time IS NULL`,
+        [endOfPrevDay, record.id]
+      );
+
+      // Calculate totals and update the record
+      const totalActive = record.active_seconds || 0;
+      const totalIdle = record.idle_seconds || 0;
+      const totalBreak = record.lunch_seconds || 0;
+      const rawTotalWork = totalActive + totalIdle;
+      const wallClockSeconds = Math.max(0, Math.floor((endOfPrevDay - new Date(record.check_in_time)) / 1000));
+      const totalWork = Math.min(rawTotalWork, wallClockSeconds);
+
+      await client.query(
+        `UPDATE attendance_records 
+         SET check_out_time = $1, 
+             total_work_duration = $2,
+             total_active_duration = $3,
+             total_idle_duration = $4,
+             total_break_duration = $5,
+             current_state = NULL,
+             last_state_change_at = NULL,
+             updated_at = NOW()
+         WHERE id = $6`,
+        [endOfPrevDay, totalWork, totalActive, totalIdle, totalBreak, record.id]
+      );
+
+      // 2. Insert/Check-in for the new day
+      // Check if a record for the next day already exists
+      const existingNextResult = await client.query(
+        `SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2::date FOR UPDATE`,
+        [userId, nextDateStr]
+      );
+
+      let nextRecord;
+      if (existingNextResult.rows.length > 0) {
+        const existingNext = existingNextResult.rows[0];
+        // If not checked in, update it
+        if (!existingNext.check_in_time) {
+          const updateNextResult = await client.query(
+            `UPDATE attendance_records 
+             SET check_in_time = $1,
+                 check_in_ip = $2,
+                 check_in_location = $3,
+                 current_state = $4,
+                 last_state_change_at = $1,
+                 updated_at = NOW()
+             WHERE id = $5
+             RETURNING *`,
+            [startOfNextDay, record.check_in_ip, record.check_in_location, prevState, existingNext.id]
+          );
+          nextRecord = updateNextResult.rows[0];
+        } else {
+          nextRecord = existingNext;
+        }
+      } else {
+        // Insert new record
+        const insertNextResult = await client.query(
+          `INSERT INTO attendance_records 
+           (user_id, date, check_in_time, check_in_ip, check_in_location, current_state, last_state_change_at) 
+           VALUES ($1, $2::date, $3, $4, $5, $6, $3) 
+           RETURNING *`,
+          [userId, nextDateStr, startOfNextDay, record.check_in_ip, record.check_in_location, prevState]
+        );
+        nextRecord = insertNextResult.rows[0];
+      }
+
+      // 3. Open appropriate logs for the new record
+      if (prevState === 'WORKING') {
+        await client.query(
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+           VALUES ($1, $2, 'active', $3)`,
+          [userId, nextRecord.id, startOfNextDay]
+        );
+      } else if (prevState === 'IDLE') {
+        await client.query(
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+           VALUES ($1, $2, 'idle', $3)`,
+          [userId, nextRecord.id, startOfNextDay]
+        );
+      } else if (prevState === 'LUNCH') {
+        await client.query(
+          `INSERT INTO activity_logs (user_id, attendance_record_id, activity_type, start_time) 
+           VALUES ($1, $2, 'lunch_break', $3)`,
+          [userId, nextRecord.id, startOfNextDay]
+        );
+        await client.query(
+          `INSERT INTO lunch_breaks (user_id, attendance_record_id, break_start_time, start_location) 
+           VALUES ($1, $2, $3, $4)`,
+          [userId, nextRecord.id, startOfNextDay, record.check_in_location]
+        );
+      }
+
+      // Update Redis cache for the user's current session info
+      try {
+        await redisClient.set(`user:${userId}:attendance`, JSON.stringify(nextRecord), { EX: 86400 });
+        await redisClient.set(`user:${userId}:current_state`, prevState, { EX: 86400 });
+      } catch (redisErr) {
+        logger.error(`Error updating redis in split:`, redisErr);
+      }
+    }
   }
 }
 

@@ -109,17 +109,19 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
-// Auto-checkout job (Daily at 23:59) - use explicit timezone if provided
-const serverTimeZone = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-logger.info(`Scheduling auto-checkout job to run at 23:59 server timezone: ${serverTimeZone}`);
+// Auto-checkout job (Daily at 23:59 IST)
+const checkOutTimeZone = 'Asia/Kolkata';
+logger.info(`Scheduling auto-checkout job to run at 23:59 timezone: ${checkOutTimeZone}`);
 cron.schedule('59 23 * * *', async () => {
   try {
-    await autoCheckOutUsers();
+    const { formatDate } = require('./utils/helpers');
+    const todayIST = formatDate(new Date());
+    await autoCheckOutUsers(todayIST);
   } catch (error) {
     logger.error('Auto-checkout job failed:', error);
   }
 }, {
-  timezone: serverTimeZone,
+  timezone: checkOutTimeZone,
 });
 
 // Cleanup old screenshots and related data (Daily at 02:00)

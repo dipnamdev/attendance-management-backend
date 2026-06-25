@@ -37,9 +37,9 @@ async function autoCheckOutIdleUsers() {
             await client.query('BEGIN');
 
             try {
-                // Calculate the check-out time as exactly 60 mins after they went idle
-                // This caps the credited idle time at 60 mins
-                const checkOutTime = new Date(new Date(record.last_state_change_at).getTime() + (MAX_IDLE_DURATION * 1000));
+                // Call checkAndSplitShift to handle any midnight crossing splits
+                const attendanceService = require('../services/attendanceService');
+                await attendanceService.checkAndSplitShift(record.user_id, client);
 
                 // Fetch current attendance record full data
                 const attendanceResult = await client.query(
@@ -47,6 +47,15 @@ async function autoCheckOutIdleUsers() {
                     [record.id]
                 );
                 let attendance = attendanceResult.rows[0];
+
+                if (attendance.check_out_time) {
+                    await client.query('COMMIT');
+                    continue;
+                }
+
+                // Calculate the check-out time as exactly 60 mins after they went idle
+                // This caps the credited idle time at 60 mins
+                const checkOutTime = new Date(new Date(record.last_state_change_at).getTime() + (MAX_IDLE_DURATION * 1000));
 
                 // Finalize current state at the capped time
                 const stateTransitionService = require('../services/stateTransitionService');

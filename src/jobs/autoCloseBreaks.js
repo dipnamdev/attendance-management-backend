@@ -55,8 +55,9 @@ async function autoCloseExcessiveBreaks() {
       await client.query('BEGIN');
 
       try {
-        // Calculate the break end time as 2 hours after start
-        const breakEndTime = new Date(new Date(brk.break_start_time).getTime() + (MAX_BREAK_DURATION * 1000));
+        // Call checkAndSplitShift to handle any midnight crossing splits
+        const attendanceService = require('../services/attendanceService');
+        await attendanceService.checkAndSplitShift(brk.user_id, client);
 
         // Fetch current attendance record
         const attendanceResult = await client.query(
@@ -64,6 +65,14 @@ async function autoCloseExcessiveBreaks() {
           [brk.attendance_record_id]
         );
         let attendance = attendanceResult.rows[0];
+
+        if (attendance.check_out_time) {
+          await client.query('COMMIT');
+          continue;
+        }
+
+        // Calculate the break end time as 2 hours after start
+        const breakEndTime = new Date(new Date(brk.break_start_time).getTime() + (MAX_BREAK_DURATION * 1000));
 
         // Finalize current state at break end time
         const stateTransitionService = require('../services/stateTransitionService');

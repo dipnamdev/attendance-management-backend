@@ -1,5 +1,6 @@
 const pool = require('../config/database');
 const logger = require('../utils/logger');
+const { formatDate } = require('../utils/helpers');
 
 function clampDurations(totalWork, totalActive, totalIdle) {
     const work = Math.max(0, totalWork || 0);
@@ -21,35 +22,19 @@ async function autoCheckOutUsers(targetDate) {
     const client = await pool.connect();
 
     try {
-        const targetDesc = targetDate ? String(targetDate) : 'today';
-        logger.info(`Running auto-checkout job for end of day (${targetDesc})...`);
+        const dateStr = targetDate || formatDate(new Date());
+        logger.info(`Running auto-checkout job for end of day (${dateStr})...`);
 
-        // Compute endOfDay for targetDate if provided, else use current date's end
-        const now = new Date();
-        let endOfDay = new Date(now);
-        if (targetDate) {
-            const t = new Date(targetDate);
-            endOfDay = new Date(t);
-        }
-        endOfDay.setHours(23, 59, 59, 999);
+        // Compute endOfDay for dateStr in Asia/Kolkata timezone
+        const recordEndOfDay = new Date(`${dateStr}T23:59:59.999+05:30`);
 
         // Find all users who are still checked in for the target date
-        let openRecords;
-        if (targetDate) {
-            openRecords = await client.query(`
-                        SELECT id, user_id, check_in_time, date
-                        FROM attendance_records
-                        WHERE date::date = $1::date
-                            AND check_out_time IS NULL
-                    `, [targetDate]);
-        } else {
-            openRecords = await client.query(`
-                        SELECT id, user_id, check_in_time, date
-                        FROM attendance_records
-                        WHERE date = CURRENT_DATE
-                            AND check_out_time IS NULL
-                    `);
-        }
+        const openRecords = await client.query(`
+                    SELECT id, user_id, check_in_time, date
+                    FROM attendance_records
+                    WHERE date::date = $1::date
+                        AND check_out_time IS NULL
+                `, [dateStr]);
 
         if (openRecords.rows.length === 0) {
             logger.info('No open attendance records found to auto-checkout.');
@@ -64,8 +49,6 @@ async function autoCheckOutUsers(targetDate) {
             await client.query('BEGIN');
 
             try {
-                const recordEndOfDay = endOfDay;
-
                 // Fetch current attendance record with state info
                 const attendanceResult = await client.query(
                     'SELECT * FROM attendance_records WHERE id = $1',
@@ -74,17 +57,45 @@ async function autoCheckOutUsers(targetDate) {
                 let attendance = attendanceResult.rows[0];
 
                 // Finalize current state at end of day
-                // Finalize current state at end of day
                 const stateTransitionService = require('../services/stateTransitionService');
+
+                // Fetch the user's last activity heartbeat from DB and Redis
+                const lastActivityRes = await client.query(
+                    `SELECT MAX(timestamp) as last_ts FROM user_activity_tracking WHERE attendance_record_id = $1`,
+                    [attendance.id]
+                );
+                const lastHeartbeat = lastActivityRes.rows[0]?.last_ts ? new Date(lastActivityRes.rows[0].last_ts) : null;
+
+                const { redisClient } = require('../config/redis');
+                let lastRedisTs = null;
+                try {
+                    const cachedActivity = await redisClient.get(`user:${record.user_id}:last_activity`);
+                    if (cachedActivity) {
+                        const parsed = JSON.parse(cachedActivity);
+                        if (parsed.lastHeartbeatTs) {
+                            lastRedisTs = new Date(parsed.lastHeartbeatTs);
+                        }
+                    }
+                } catch (redisErr) {
+                    logger.warn(`Error reading redis last_activity in auto-checkout:`, redisErr);
+                }
+
+                const mostRecentHeartbeat = (lastHeartbeat && lastRedisTs) 
+                    ? new Date(Math.max(lastHeartbeat.getTime(), lastRedisTs.getTime()))
+                    : (lastHeartbeat || lastRedisTs);
+
+                // If they have a recent heartbeat (within 15 minutes of recordEndOfDay)
+                // AND the current time is close to that end of day (so we don't skip them if we are backfilling past days)
+                const now = new Date();
+                const isRecent = Math.abs(now.getTime() - recordEndOfDay.getTime()) < 12 * 60 * 60 * 1000;
+                if (isRecent && mostRecentHeartbeat && (recordEndOfDay.getTime() - mostRecentHeartbeat.getTime() <= 15 * 60 * 1000)) {
+                    logger.info(`User ${record.user_id} is active (last heartbeat at ${mostRecentHeartbeat.toISOString()}). Skipping auto-checkout to allow night shift split.`);
+                    await client.query('COMMIT');
+                    continue;
+                }
 
                 // FIX: Detect if user stopped sending heartbeats (e.g. PC shutdown/Sleep) while WORKING
                 if (attendance.current_state === 'WORKING') {
-                    const lastActivityRes = await client.query(
-                        `SELECT MAX(timestamp) as last_ts FROM user_activity_tracking WHERE attendance_record_id = $1`,
-                        [attendance.id]
-                    );
-                    const lastHeartbeat = lastActivityRes.rows[0]?.last_ts ? new Date(lastActivityRes.rows[0].last_ts) : null;
-
                     // If last heartbeat was significantly before EndOfDay (e.g. > 15 mins), assume they went idle/offline then
                     if (lastHeartbeat && (recordEndOfDay.getTime() - lastHeartbeat.getTime() > 15 * 60 * 1000)) {
                         logger.info(`User ${record.user_id} stopped tracking at ${lastHeartbeat.toISOString()}. Switching to IDLE before auto-checkout.`);

@@ -47,6 +47,9 @@ class ActivityService {
     try {
       await client.query('BEGIN');
 
+      // Split/close any open previous day shifts first
+      await attendanceService.checkAndSplitShift(userId, client);
+
       const today = formatDate(new Date());
       // FOR UPDATE prevents a concurrent background job (checkForIdleUsers) from
       // reading the same stale row and double-incrementing active_seconds/idle_seconds.
@@ -93,6 +96,14 @@ class ActivityService {
         // when they shouldn't. But the client logic is solid now.
       }
 
+      // Capping lastInputTs to prevent negative durations and activity_logs corruption
+      // when a heartbeat arrives right after a state change (e.g. ending lunch break).
+      let lastStateChangeTime = new Date(attendance.last_state_change_at || 0).getTime();
+      if (lastInputTs < lastStateChangeTime) {
+        logger.info(`Capping lastInputTs for user ${userId} from ${new Date(lastInputTs).toISOString()} to lastStateChangeTime ${new Date(lastStateChangeTime).toISOString()}`);
+        lastInputTs = lastStateChangeTime;
+      }
+
       // Check for Auto-Checkout (Inactive > threshold)
       const currentGapSeconds = (now - lastInputTs) / 1000;
       const checkoutLimitMinutes = Math.floor(AUTO_CHECKOUT_THRESHOLD / 60);
@@ -107,7 +118,7 @@ class ActivityService {
         const checkoutResult = await attendanceService.checkOut(userId, 'Auto-Checkout', { reason: 'Inactive > 60m' });
 
         // Fetch user name for notification
-        const userResult = await client.query('SELECT name FROM users WHERE id = $1', [userId]);
+        const userResult = await pool.query('SELECT name FROM users WHERE id = $1', [userId]);
         const userName = userResult.rows[0]?.name || 'Unknown User';
         const currentTime = formatTime(new Date());
         
@@ -168,7 +179,7 @@ class ActivityService {
       logger.info(`State Decision: secondsSinceInput=${secondsSinceInput}, shouldWorking=${currentShouldBeWorking}, desired=${desiredState}, current=${attendance.current_state}`);
 
       const currentState = attendance.current_state;
-      const lastStateChangeTime = new Date(attendance.last_state_change_at || 0).getTime();
+      lastStateChangeTime = new Date(attendance.last_state_change_at || 0).getTime();
       const transitionTime = new Date(Math.max(lastInputTs, lastStateChangeTime));
 
       if (currentState && currentState !== desiredState && currentState !== 'LUNCH') {
@@ -234,15 +245,12 @@ class ActivityService {
   // Background job to check for users who haven't sent heartbeats
   async checkForIdleUsers() {
     try {
-      const today = formatDate(new Date());
-
-      // Get all users who are checked in but haven't checked out
+      // Get all users who are checked in but haven't checked out (any date!)
       const activeUsers = await pool.query(
         `SELECT ar.*, u.id as user_id 
          FROM attendance_records ar
          JOIN users u ON ar.user_id = u.id
-         WHERE ar.date = $1 AND ar.check_out_time IS NULL AND ar.current_state IN ('WORKING', 'IDLE')`,
-        [today]
+         WHERE ar.check_out_time IS NULL AND ar.current_state IN ('WORKING', 'IDLE')`
       );
 
       const now = Date.now();
@@ -286,11 +294,11 @@ class ActivityService {
             try {
               await client.query('BEGIN');
 
-              // Fetch fresh attendance record with row lock so concurrent heartbeats
+              // Fetch fresh attendance record with row lock by ID so concurrent heartbeats
               // cannot simultaneously apply a state transition on the same row.
               const freshAttendance = await client.query(
-                'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2 FOR UPDATE',
-                [userId, today]
+                'SELECT * FROM attendance_records WHERE id = $1 FOR UPDATE',
+                [record.id]
               );
 
               if (freshAttendance.rows.length === 0) {
@@ -344,6 +352,18 @@ class ActivityService {
   }
 
   async getCurrentActivity(userId) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await attendanceService.checkAndSplitShift(userId, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      logger.error('Error in getCurrentActivity checkAndSplitShift:', err);
+    } finally {
+      client.release();
+    }
+
     const today = formatDate(new Date());
     const result = await pool.query(
       `SELECT al.* 
@@ -436,6 +456,9 @@ class ActivityService {
     try {
       await client.query('BEGIN');
 
+      // Split/close any open previous day shifts first
+      await attendanceService.checkAndSplitShift(userId, client);
+
       const today = formatDate(new Date());
       const attendanceResult = await client.query(
         'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2',
@@ -515,6 +538,9 @@ class ActivityService {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // Split/close any open previous day shifts first
+      await attendanceService.checkAndSplitShift(userId, client);
 
       const today = formatDate(new Date());
       const attendanceResult = await client.query(
@@ -599,6 +625,18 @@ class ActivityService {
   }
 
   async getCurrentLunchBreak(userId) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await attendanceService.checkAndSplitShift(userId, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      logger.error('Error in getCurrentLunchBreak checkAndSplitShift:', err);
+    } finally {
+      client.release();
+    }
+
     const today = formatDate(new Date());
     const result = await pool.query(
       `SELECT lb.* 
