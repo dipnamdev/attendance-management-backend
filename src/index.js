@@ -14,7 +14,7 @@ const autoCheckOutUsers = require('./jobs/autoCheckOut');
 const autoCheckOutIdleUsers = require('./jobs/autoCheckOutIdle');
 const createDailyAttendance = require('./jobs/createDailyAttendance');
 const cleanupOldData = require('./jobs/cleanupOldData');
-const dailyReportJob = require('./jobs/dailyReportJob');
+// const dailyReportJob = require('./jobs/dailyReportJob'); // Teams notification cron disabled
 
 validateConfig();
 
@@ -135,15 +135,15 @@ cron.schedule('0 2 * * *', async () => {
   }
 });
  
-// Daily Teams Report (Midnight)
-cron.schedule('0 0 * * *', async () => {
-  logger.info('Running daily Teams report job...');
-  try {
-    await dailyReportJob.runDailyReport();
-  } catch (error) {
-    logger.error('Daily Teams report job failed:', error);
-  }
-});
+// Daily Teams Report (Midnight) - disabled per request
+// cron.schedule('0 0 * * *', async () => {
+//   logger.info('Running daily Teams report job...');
+//   try {
+//     await dailyReportJob.runDailyReport();
+//   } catch (error) {
+//     logger.error('Daily Teams report job failed:', error);
+//   }
+// });
 
 async function startServer() {
   try {

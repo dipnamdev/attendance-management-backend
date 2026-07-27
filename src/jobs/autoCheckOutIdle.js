@@ -85,7 +85,18 @@ async function autoCheckOutIdleUsers() {
                 const totalActive = attendance.active_seconds || 0;
                 const totalIdle = attendance.idle_seconds || 0;
                 const totalBreak = attendance.lunch_seconds || 0;
-                const totalWork = totalActive + totalIdle;
+                const rawTotalWork = totalActive + totalIdle;
+
+                // Safety cap: total work can never exceed wall-clock time (check-in → capped checkout).
+                const wallClockSeconds = Math.max(0, Math.floor((checkOutTime - new Date(attendance.check_in_time)) / 1000));
+                const totalWork = Math.min(rawTotalWork, wallClockSeconds);
+
+                if (rawTotalWork > wallClockSeconds) {
+                    logger.warn(
+                        `[IDLE-CHECKOUT CLAMP] record=${record.id} rawWork=${rawTotalWork}s exceeds wallClock=${wallClockSeconds}s. ` +
+                        `Clamped. active=${totalActive}s, idle=${totalIdle}s, lunch=${totalBreak}s`
+                    );
+                }
 
                 // Auto check-out the employee
                 await client.query(`

@@ -1,4 +1,5 @@
 const reportService = require('../services/reportService');
+const monthlyRegisterService = require('../services/monthlyRegisterService');
 const { successResponse, errorResponse } = require('../utils/helpers');
 const logger = require('../utils/logger');
 
@@ -93,6 +94,31 @@ const exportReport = async (req, res, next) => {
   }
 };
 
+const getMonthlyRegister = async (req, res, next) => {
+  try {
+    const currentDate = new Date();
+    const month = req.query.month ? parseInt(req.query.month, 10) : currentDate.getMonth() + 1;
+    const year = req.query.year ? parseInt(req.query.year, 10) : currentDate.getFullYear();
+
+    if (!Number.isInteger(month) || month < 1 || month > 12) {
+      return errorResponse(res, 'INVALID_MONTH', 'Month must be an integer between 1 and 12', 400);
+    }
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+      return errorResponse(res, 'INVALID_YEAR', 'Year must be a valid 4-digit year', 400);
+    }
+
+    const buffer = await monthlyRegisterService.generateMonthlyRegister(month, year);
+
+    const filename = `Attendance_Register_${year}-${String(month).padStart(2, '0')}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(buffer);
+  } catch (error) {
+    logger.error('Get monthly register error:', error);
+    next(error);
+  }
+};
+
 module.exports = {
   getDailyReport,
   getWeeklyReport,
@@ -100,4 +126,5 @@ module.exports = {
   getProductivitySummary,
   getTeamOverview,
   exportReport,
+  getMonthlyRegister,
 };

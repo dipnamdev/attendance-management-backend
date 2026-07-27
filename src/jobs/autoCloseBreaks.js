@@ -90,11 +90,33 @@ async function autoCloseExcessiveBreaks() {
           WHERE id = $3
         `, [breakEndTime, MAX_BREAK_DURATION, brk.break_id]);
 
+        // Close any open activity_logs for this record at the same capped time.
+        // Without this, the open 'lunch_break' audit-trail row stays unclosed and
+        // only gets closed whenever the employee eventually checks out for real —
+        // producing a wildly inflated duration in the activity log (e.g. showing
+        // a 7-hour lunch break when the actual break was capped at 2 hours).
+        await client.query(`
+          UPDATE activity_logs
+          SET end_time = $1, duration = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
+          WHERE attendance_record_id = $2 AND end_time IS NULL
+        `, [breakEndTime, brk.attendance_record_id]);
+
         // Calculate totals from state-based counters
         const totalActive = attendance.active_seconds || 0;
         const totalIdle = attendance.idle_seconds || 0;
         const totalBreak = attendance.lunch_seconds || 0;
-        const totalWork = totalActive + totalIdle;
+        const rawTotalWork = totalActive + totalIdle;
+
+        // Safety cap: total work can never exceed wall-clock time (check-in → capped break-end checkout).
+        const wallClockSeconds = Math.max(0, Math.floor((breakEndTime - new Date(attendance.check_in_time)) / 1000));
+        const totalWork = Math.min(rawTotalWork, wallClockSeconds);
+
+        if (rawTotalWork > wallClockSeconds) {
+          logger.warn(
+            `[BREAK-CHECKOUT CLAMP] record=${brk.attendance_record_id} rawWork=${rawTotalWork}s exceeds wallClock=${wallClockSeconds}s. ` +
+            `Clamped. active=${totalActive}s, idle=${totalIdle}s, lunch=${totalBreak}s`
+          );
+        }
 
         // Auto check-out the employee at the break end time
         await client.query(`

@@ -715,10 +715,16 @@ class AttendanceService {
     const todayStr = formatDate(referenceDate || new Date());
 
     // Find any open attendance record from a previous date
+    // FOR UPDATE prevents a concurrent call (e.g. a heartbeat and a lunch-break
+    // request racing across midnight) from both reading the same open record and
+    // double-counting its final duration. If a concurrent transaction already
+    // committed the split, Postgres re-checks the WHERE clause on lock release and
+    // this SELECT simply returns no rows for that record instead of reprocessing it.
     const openRecordsResult = await client.query(
-      `SELECT * FROM attendance_records 
-       WHERE user_id = $1 AND date < $2::date AND check_out_time IS NULL 
-       ORDER BY date ASC`,
+      `SELECT * FROM attendance_records
+       WHERE user_id = $1 AND date < $2::date AND check_out_time IS NULL
+       ORDER BY date ASC
+       FOR UPDATE`,
       [userId, todayStr]
     );
 

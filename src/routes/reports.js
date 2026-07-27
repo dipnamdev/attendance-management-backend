@@ -9,6 +9,7 @@ router.get('/monthly', authenticateToken, reportController.getMonthlyReport);
 router.get('/productivity-summary', authenticateToken, reportController.getProductivitySummary);
 router.get('/team-overview', authenticateToken, reportController.getTeamOverview);
 router.get('/export', authenticateToken, authorizeRoles('admin'), reportController.exportReport);
+router.get('/monthly-register', authenticateToken, authorizeRoles('admin', 'hr'), reportController.getMonthlyRegister);
 
 module.exports = router;  
  
