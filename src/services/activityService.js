@@ -38,14 +38,49 @@ class ActivityService {
       mouse_clicks = 0,
       keyboard_strokes = 0,
       idle_time_seconds = 0,
+      device_id,
     } = activityData;
 
     // DEBUG LOG
     logger.info(`Heartbeat for ${userId}: clicks=${mouse_clicks}, keys=${keyboard_strokes}, is_active=${activityData.is_active}, activeWindow=${active_window}`);
 
     const client = await pool.connect();
+    // Guards against releasing the same pooled client twice (the auto-checkout
+    // branch below releases early, and the finally block would release again).
+    // node-postgres throws on a double release, which would otherwise replace a
+    // valid AUTO_CHECKED_OUT response with an unhandled 500.
+    let clientReleased = false;
+    const releaseClient = () => {
+      if (!clientReleased) {
+        clientReleased = true;
+        client.release();
+      }
+    };
     try {
       await client.query('BEGIN');
+
+      // Single-active-Tracker-device enforcement. Only requests carrying a
+      // device_id are checked at all, so Dashboard traffic (which never sends
+      // one) is completely unaffected. If another device has since logged in
+      // and become active_tracker_device_id, this device is superseded — stop
+      // it here rather than let it keep silently recording time.
+      if (device_id) {
+        const deviceCheck = await client.query(
+          'SELECT active_tracker_device_id FROM users WHERE id = $1',
+          [userId]
+        );
+        const activeDeviceId = deviceCheck.rows[0]?.active_tracker_device_id;
+
+        if (activeDeviceId && activeDeviceId !== device_id) {
+          await client.query('ROLLBACK');
+          return {
+            error: 'DEVICE_SUPERSEDED',
+            message: 'Your account is now active on another device. Please sign in again if you want to use the Tracker here.',
+          };
+        }
+
+        await client.query('UPDATE users SET active_tracker_last_seen = NOW() WHERE id = $1', [userId]);
+      }
 
       const referenceDate = activityData.timestamp ? new Date(activityData.timestamp) : new Date();
       // Split/close any open previous day shifts first relative to the heartbeat date
@@ -114,7 +149,7 @@ class ActivityService {
       if (currentGapSeconds > AUTO_CHECKOUT_THRESHOLD) {
         logger.info(`User ${userId} inactive for ${currentGapSeconds}s (> ${checkoutLimitMinutes}m). Auto-checking out.`);
         await client.query('ROLLBACK');
-        client.release();
+        releaseClient();
 
         const checkoutResult = await attendanceService.checkOut(userId, 'Auto-Checkout', { reason: 'Inactive > 60m' });
 
@@ -235,11 +270,15 @@ class ActivityService {
         current_state: attendance.current_state
       };
     } catch (error) {
-      await client.query('ROLLBACK');
+      // Only roll back if this client is still ours to use — the auto-checkout
+      // branch may have already rolled back and returned it to the pool.
+      if (!clientReleased) {
+        await client.query('ROLLBACK').catch(() => {});
+      }
       logger.error('Heartbeat processing error:', error);
       throw error;
     } finally {
-      client.release();
+      releaseClient();
     }
   }
 
@@ -461,8 +500,11 @@ class ActivityService {
       await attendanceService.checkAndSplitShift(userId, client);
 
       const today = formatDate(new Date());
+      // FOR UPDATE serializes concurrent lunch-start requests so two of them
+      // cannot both pass the "no break in progress" check below and each apply
+      // a state transition against the same pre-update row.
       const attendanceResult = await client.query(
-        'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2',
+        'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2 FOR UPDATE',
         [userId, today]
       );
 
@@ -544,8 +586,11 @@ class ActivityService {
       await attendanceService.checkAndSplitShift(userId, client);
 
       const today = formatDate(new Date());
+      // FOR UPDATE serializes concurrent lunch-end requests. Without it, two of
+      // them both read current_state='LUNCH' with the same last_state_change_at
+      // and each add the full break duration to lunch_seconds — double-counting it.
       const attendanceResult = await client.query(
-        'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2',
+        'SELECT * FROM attendance_records WHERE user_id = $1 AND date = $2 FOR UPDATE',
         [userId, today]
       );
 

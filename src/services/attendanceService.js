@@ -38,8 +38,10 @@ class AttendanceService {
 
       const today = formatDate(new Date());
 
+      // FOR UPDATE prevents two concurrent check-ins from both seeing "no open
+      // record" and racing to create/update the same day's row.
       const existingAttendance = await client.query(
-        'SELECT * FROM attendance_records WHERE user_id = $1 AND date::date = $2::date',
+        'SELECT * FROM attendance_records WHERE user_id = $1 AND date::date = $2::date FOR UPDATE',
         [userId, today]
       );
 
@@ -178,8 +180,15 @@ class AttendanceService {
 
       const today = formatDate(finalCheckoutTime);
 
+      // FOR UPDATE serializes concurrent check-outs for the same user. Without it,
+      // two simultaneous requests (e.g. two heartbeats both crossing the 60-minute
+      // auto-checkout threshold milliseconds apart) both read the same pre-update
+      // row, both see check_out_time as NULL, and both call finalizeState() — which
+      // adds the SAME time-in-state to active_seconds/idle_seconds/lunch_seconds
+      // twice. With the lock, the second request blocks, then re-reads the row with
+      // check_out_time already set and correctly returns ALREADY_CHECKED_OUT.
       const attendanceResult = await client.query(
-        'SELECT * FROM attendance_records WHERE user_id = $1 AND date::date = $2::date',
+        'SELECT * FROM attendance_records WHERE user_id = $1 AND date::date = $2::date FOR UPDATE',
         [userId, today]
       );
 

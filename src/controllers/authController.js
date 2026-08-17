@@ -29,7 +29,7 @@ const register = async (req, res, next) => {
 
 const login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, device_id } = req.body;
 
     const result = await pool.query(
       'SELECT * FROM users WHERE email = $1',
@@ -50,6 +50,20 @@ const login = async (req, res, next) => {
 
     if (!isValidPassword) {
       return errorResponse(res, 'INVALID_CREDENTIALS', 'Invalid email or password', 401);
+    }
+
+    // Only the Tracker app sends device_id (the web Dashboard never does), so
+    // this only ever registers/supersedes a Tracker device — Dashboard logins
+    // are completely unaffected and can happen alongside an active Tracker.
+    // Logging in here always takes over as the active device (no rejection);
+    // whichever device was previously active gets logged out on its next
+    // heartbeat once it no longer matches active_tracker_device_id.
+    if (device_id) {
+      await pool.query(
+        'UPDATE users SET active_tracker_device_id = $1, active_tracker_last_seen = NOW() WHERE id = $2',
+        [device_id, user.id]
+      );
+      logger.info(`Tracker device registered for user ${email}: ${device_id}`);
     }
 
     const token = jwt.sign(

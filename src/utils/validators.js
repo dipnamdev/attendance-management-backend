@@ -27,6 +27,7 @@ const registerValidation = [
 const loginValidation = [
   body('email').isEmail().withMessage('Valid email is required'),
   body('password').notEmpty().withMessage('Password is required'),
+  body('device_id').optional().isString().withMessage('device_id must be a string'),
   validate,
 ];
 

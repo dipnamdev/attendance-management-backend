@@ -56,9 +56,12 @@ class ReportService {
     const end = endDate || formatDate(new Date());
 
     const attendance = await pool.query(
-      `SELECT * FROM attendance_records 
-       WHERE user_id = $1 AND date::date >= $2::date AND date::date <= $3::date
-       ORDER BY date DESC`,
+      `SELECT ar.*, an.note_text AS daily_note
+       FROM attendance_records ar
+       LEFT JOIN attendance_notes an
+         ON an.user_id = ar.user_id AND an.date::date = ar.date::date
+       WHERE ar.user_id = $1 AND ar.date::date >= $2::date AND ar.date::date <= $3::date
+       ORDER BY ar.date DESC`,
       [userId, start, end]
     );
 

@@ -53,8 +53,36 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => {
-  res.json({ success: true, status: 'healthy', timestamp: new Date().toISOString() });
+// Liveness only: the process is up and serving. Does NOT prove the app can do
+// any real work — use /health for that.
+app.get('/health/live', (req, res) => {
+  res.json({ success: true, status: 'alive', timestamp: new Date().toISOString() });
+});
+
+// Readiness: verifies the database is actually reachable. This previously
+// returned 200 unconditionally, so an outage where Postgres was unreachable
+// still reported "healthy" and went unnoticed for hours while every real
+// request failed. A dependency check is what makes that visible.
+app.get('/health', async (req, res) => {
+  const pool = require('./config/database');
+  try {
+    await pool.query('SELECT 1');
+    return res.json({
+      success: true,
+      status: 'healthy',
+      database: 'connected',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error('Health check failed - database unreachable:', error);
+    return res.status(503).json({
+      success: false,
+      status: 'unhealthy',
+      database: 'unreachable',
+      error: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 app.use('/api/auth', authRoutes);

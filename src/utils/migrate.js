@@ -195,6 +195,11 @@ ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS untracked_seconds INTEGE
 ALTER TABLE activity_logs DROP CONSTRAINT IF EXISTS activity_logs_activity_type_check;
 ALTER TABLE activity_logs ADD CONSTRAINT activity_logs_activity_type_check CHECK (activity_type IN ('active', 'idle', 'lunch_break', 'meeting', 'untracked'));
 ALTER TABLE attendance_records ALTER COLUMN check_in_time DROP NOT NULL;
+
+-- Single-active-Tracker-device enforcement (Dashboard logins never set these;
+-- only the Tracker app sends a device_id, so Dashboard access is unaffected)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS active_tracker_device_id VARCHAR(255);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS active_tracker_last_seen TIMESTAMP;
 `;
 
 async function runMigration() {

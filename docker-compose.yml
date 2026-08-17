@@ -31,7 +31,11 @@ services:
     restart: always
     stop_grace_period: 5s
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      # Must be 127.0.0.1, not localhost: inside the container localhost
+      # resolves to ::1 (IPv6) but the app binds 0.0.0.0 (IPv4 only), so
+      # "localhost" always failed with Connection refused and the container
+      # reported unhealthy permanently.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
